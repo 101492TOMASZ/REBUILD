@@ -5,7 +5,7 @@ Desktopowa aplikacja z graficznym interfejsem użytkownika do automatycznej anal
 ## Co działa
 
 ### Detekcja pojazdów
-- Wykrywanie samochodów, motocykli, autobusów i ciężarówek na zdjęciu (YOLOv8s, klasy COCO)
+- Wykrywanie samochodów na zdjęciu (YOLOv8s, klasy COCO)
 - Automatyczny wybór najlepszego pojazdu (największy lub najbardziej wycentrowany)
 - Rysowanie bounding boxa i wycięcie (crop) obszaru z pojazdem
 

@@ -13,6 +13,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 
 def main():

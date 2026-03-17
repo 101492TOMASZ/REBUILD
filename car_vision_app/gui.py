@@ -7,6 +7,7 @@ import sys
 import os
 import cv2
 import numpy as np
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -14,10 +15,13 @@ from typing import Optional
 import torch
 torch.serialization.add_safe_globals([])
 
+logger = logging.getLogger(__name__)
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QFrame, QDialog,
-    QMessageBox, QGraphicsDropShadowEffect, QSizePolicy, QSpacerItem
+    QMessageBox, QGraphicsDropShadowEffect, QSizePolicy, QSpacerItem,
+    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QLineEdit
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtGui import QPixmap, QImage, QFont, QColor
@@ -26,6 +30,7 @@ try:
     from .detection import CarDetector
     from .classification import BrandClassifier
     from .anpr import ANPRModule
+    from .database import Database
 except ImportError:
     current_dir = Path(__file__).parent
     if str(current_dir) not in sys.path:
@@ -33,162 +38,193 @@ except ImportError:
     from detection import CarDetector
     from classification import BrandClassifier
     from anpr import ANPRModule
+    from database import Database
 
 
 # ==================== STYLE SHEET ====================
 DARK_STYLE = """
 /* Main Window */
 QMainWindow {
-    background-color: #0d1117;
+    background-color: #0a0e27;
 }
 
 QWidget {
-    background-color: #0d1117;
-    color: #c9d1d9;
+    background-color: #0a0e27;
+    color: #e8eef5;
     font-family: 'Segoe UI', 'SF Pro Display', -apple-system, sans-serif;
 }
 
 /* Cards */
 QFrame[class="card"] {
-    background-color: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 12px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #0f1628, stop:1 #0d1420);
+    border: 1px solid #1e293b;
+    border-radius: 20px;
+    padding: 16px;
 }
 
 /* Labels */
 QLabel {
-    color: #c9d1d9;
+    color: #e8eef5;
+    background-color: transparent;
 }
 
 QLabel[class="title"] {
     font-size: 28px;
     font-weight: 700;
-    color: #f0f6fc;
+    color: #ffffff;
+    background-color: transparent;
+    letter-spacing: -0.5px;
 }
 
 QLabel[class="subtitle"] {
     font-size: 14px;
-    color: #8b949e;
+    color: #94a3b8;
+    background-color: transparent;
 }
 
 QLabel[class="section-title"] {
     font-size: 16px;
-    font-weight: 600;
-    color: #f0f6fc;
+    font-weight: 700;
+    color: #f1f5f9;
+    background-color: transparent;
+    padding: 12px 0px;
 }
 
 QLabel[class="result-value"] {
-    font-size: 32px;
-    font-weight: 700;
+    font-size: 36px;
+    font-weight: 800;
+    color: #06b6d4;
+    background-color: transparent;
+    padding: 8px;
+    border-radius: 12px;
+    letter-spacing: -1px;
 }
 
 QLabel[class="result-label"] {
-    font-size: 12px;
-    color: #8b949e;
+    font-size: 11px;
+    color: #64748b;
+    background-color: transparent;
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 1.5px;
+    font-weight: 600;
 }
 
 /* Buttons */
 QPushButton {
     border: none;
-    border-radius: 8px;
-    padding: 12px 24px;
+    border-radius: 12px;
+    padding: 14px 28px;
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    min-height: 20px;
 }
 
 QPushButton[class="primary"] {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #238636, stop:1 #2ea043);
+        stop:0 #059669, stop:1 #10b981);
     color: white;
 }
 
 QPushButton[class="primary"]:hover {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #2ea043, stop:1 #3fb950);
+        stop:0 #10b981, stop:1 #34d399);
 }
 
 QPushButton[class="primary"]:pressed {
-    background: #238636;
+    background: #047857;
 }
 
 QPushButton[class="primary"]:disabled {
-    background: #21262d;
-    color: #484f58;
+    background: #1e293b;
+    color: #475569;
 }
 
 QPushButton[class="secondary"] {
-    background: #21262d;
-    color: #c9d1d9;
-    border: 1px solid #30363d;
+    background: #1e293b;
+    color: #cbd5e1;
+    border: 1px solid #334155;
 }
 
 QPushButton[class="secondary"]:hover {
-    background: #30363d;
-    border-color: #8b949e;
+    background: #334155;
+    border-color: #64748b;
+    color: #e2e8f0;
 }
 
 QPushButton[class="secondary"]:pressed {
-    background: #161b22;
+    background: #0f172a;
 }
 
 QPushButton[class="accent"] {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #1f6feb, stop:1 #388bfd);
+        stop:0 #0ea5e9, stop:1 #06b6d4);
     color: white;
 }
 
 QPushButton[class="accent"]:hover {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #388bfd, stop:1 #58a6ff);
+        stop:0 #06b6d4, stop:1 #22d3ee);
 }
 
 QPushButton[class="accent"]:disabled {
-    background: #21262d;
-    color: #484f58;
+    background: #1e293b;
+    color: #475569;
 }
 
 QPushButton[class="danger"] {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #da3633, stop:1 #f85149);
+        stop:0 #ef4444, stop:1 #f87171);
     color: white;
 }
 
 QPushButton[class="danger"]:hover {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #f85149, stop:1 #ff7b72);
+        stop:0 #f87171, stop:1 #fca5a5);
 }
 
 /* Scrollbar */
 QScrollBar:vertical {
-    background: #161b22;
-    width: 8px;
-    border-radius: 4px;
+    background: transparent;
+    width: 10px;
+    border-radius: 5px;
+    margin: 0px;
 }
 
 QScrollBar::handle:vertical {
-    background: #30363d;
-    border-radius: 4px;
-    min-height: 30px;
+    background: #475569;
+    border-radius: 5px;
+    min-height: 40px;
+    border: none;
 }
 
 QScrollBar::handle:vertical:hover {
-    background: #484f58;
+    background: #64748b;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    border: none;
+    background: none;
 }
 
 /* Message Box */
 QMessageBox {
-    background-color: #161b22;
+    background-color: #0f1628;
+    border: 1px solid #1e293b;
+    border-radius: 16px;
 }
 
 QMessageBox QLabel {
-    color: #c9d1d9;
+    color: #e8eef5;
+    background-color: transparent;
 }
 
 /* Dialog */
 QDialog {
-    background-color: #161b22;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #0f1628, stop:1 #0d1420);
+    border-radius: 16px;
 }
 """
 
@@ -312,9 +348,10 @@ class ImageCard(QFrame):
         self.image_container = QFrame()
         self.image_container.setStyleSheet("""
             QFrame {
-                background-color: #0d1117;
-                border: 2px dashed #30363d;
-                border-radius: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0f172a, stop:1 #0a0e27);
+                border: 2px dashed #334155;
+                border-radius: 14px;
             }
         """)
         self.image_container.setMinimumHeight(150)
@@ -327,7 +364,7 @@ class ImageCard(QFrame):
         self.placeholder_text = placeholder
         
         self.placeholder_label = QLabel(placeholder)
-        self.placeholder_label.setStyleSheet("color: #484f58; font-size: 13px;")
+        self.placeholder_label.setStyleSheet("color: #64748b; font-size: 13px; font-weight: 500;")
         self.placeholder_label.setAlignment(Qt.AlignCenter)
         
         img_layout.addWidget(self.image_label)
@@ -336,10 +373,10 @@ class ImageCard(QFrame):
         layout.addWidget(self.image_container)
         
         shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
+        shadow.setBlurRadius(24)
         shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setYOffset(8)
+        shadow.setColor(QColor(0, 0, 0, 80))
         self.setGraphicsEffect(shadow)
     
     def set_image(self, pixmap: QPixmap):
@@ -347,9 +384,10 @@ class ImageCard(QFrame):
         self.placeholder_label.hide()
         self.image_container.setStyleSheet("""
             QFrame {
-                background-color: #0d1117;
-                border: 2px solid #238636;
-                border-radius: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0f172a, stop:1 #0a0e27);
+                border: 2px solid #06b6d4;
+                border-radius: 14px;
             }
         """)
     
@@ -368,19 +406,19 @@ class ImageCard(QFrame):
 class ResultCard(QFrame):
     """Karta wyświetlająca pojedynczy wynik."""
     
-    def __init__(self, icon: str, label: str, accent_color: str = "#238636"):
+    def __init__(self, icon: str, label: str, accent_color: str = "#06b6d4"):
         super().__init__()
         self.setProperty("class", "card")
         self.accent_color = accent_color
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(8)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(10)
         
         header = QHBoxLayout()
         
         icon_label = QLabel(icon)
-        icon_label.setStyleSheet("font-size: 24px;")
+        icon_label.setStyleSheet("font-size: 28px;")
         header.addWidget(icon_label)
         
         self.label = QLabel(label)
@@ -400,10 +438,10 @@ class ResultCard(QFrame):
         layout.addWidget(self.subtitle_label)
         
         shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
+        shadow.setBlurRadius(24)
         shadow.setXOffset(0)
-        shadow.setYOffset(4)
-        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setYOffset(8)
+        shadow.setColor(QColor(0, 0, 0, 80))
         self.setGraphicsEffect(shadow)
     
     def set_value(self, value: str, subtitle: str = ""):
@@ -549,6 +587,13 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.anpr_worker = None
         
+        # Inicjalizacja bazy danych
+        try:
+            self.db = Database()
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+            self.db = None
+        
         self.last_car_crop = None
         self.last_brand = None
         
@@ -607,6 +652,21 @@ class MainWindow(QMainWindow):
         self.heatmap_btn.setEnabled(False)
         self.heatmap_btn.clicked.connect(self.show_heatmap)
         btn_layout.addWidget(self.heatmap_btn)
+        
+        self.save_db_btn = QPushButton("  💾  Zapisz do bazy")
+        self.save_db_btn.setProperty("class", "secondary")
+        self.save_db_btn.setMinimumSize(140, 44)
+        self.save_db_btn.setCursor(Qt.PointingHandCursor)
+        self.save_db_btn.setEnabled(False)
+        self.save_db_btn.clicked.connect(self.save_to_database)
+        btn_layout.addWidget(self.save_db_btn)
+        
+        self.history_btn = QPushButton("  📋  Historia")
+        self.history_btn.setProperty("class", "secondary")
+        self.history_btn.setMinimumSize(140, 44)
+        self.history_btn.setCursor(Qt.PointingHandCursor)
+        self.history_btn.clicked.connect(self.show_history)
+        btn_layout.addWidget(self.history_btn)
         
         header.addLayout(btn_layout)
         main_layout.addLayout(header)
@@ -777,6 +837,10 @@ class MainWindow(QMainWindow):
             color = "#f85149"
         self.brand_card.value_label.setStyleSheet(f"color: {color}; font-size: 32px; font-weight: 700;")
         
+        # Włącz przycisk zapisu do bazy jeśli istnieje baza danych
+        if self.db is not None:
+            self.save_db_btn.setEnabled(True)
+        
         self.status_bar.set_status("Detekcja zakończona", "✅")
         
         # Uruchom osobno odczyt tablicy (nie blokuje UI)
@@ -836,6 +900,365 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Błąd", f"Nie udało się wygenerować mapy ciepła:\n{str(e)}")
             self.status_bar.set_status(f"Błąd: {str(e)}", "❌")
+    
+    def save_to_database(self):
+        """Zapisuje wynik analizy do bazy danych."""
+        if self.db is None:
+            QMessageBox.warning(self, "Baza niedostępna", "Baza danych nie jest dostępna")
+            return
+        
+        if self.current_image is None:
+            QMessageBox.warning(self, "Brak obrazu", "Wczytaj obraz por przed zapisem")
+            return
+        
+        try:
+            self.status_bar.set_status("Zapisywanie do bazy danych...", "⏳")
+            QApplication.processEvents()
+            
+            # Pobierz rozpoznane wyniki
+            brand_text = self.brand_card.value_label.text()
+            car_detected = brand_text != "---"
+            
+            plate_text = self.plate_card.plate_text.text()
+            plate_detected = plate_text and plate_text != "---" and plate_text != "Nie wykryto tablicy"
+            
+            # Pobierz confidence values
+            brand_confidence = 0.0
+            plate_confidence = 0.0
+            try:
+                if self.brand_card.subtitle_label.text():
+                    brand_confidence = float(self.brand_card.subtitle_label.text().split(": ")[1].rstrip("%")) / 100
+                if self.plate_card.confidence_label.text():
+                    plate_confidence = float(self.plate_card.confidence_label.text().split(": ")[1].rstrip("%")) / 100
+            except:
+                pass
+            
+            # Zapisz do bazy
+            detection_id = self.db.add_detection(
+                image=self.current_image,
+                car_detected=car_detected,
+                car_image=self.last_car_crop if self.last_car_crop is not None else None,
+                car_brand=brand_text if car_detected else None,
+                brand_confidence=brand_confidence,
+                plate_detected=plate_detected,
+                plate_image=None,  # TODO: przesłać plate_crop jeśli dostępny
+                plate_text=plate_text if plate_detected else None,
+                plate_confidence=plate_confidence,
+                notes=None
+            )
+            
+            self.status_bar.set_status(f"✅ Zapisano do bazy (ID: {detection_id})", "✅")
+            QMessageBox.information(self, "Sukces", f"Wynik został zapisany do bazy danych.\nID: {detection_id}\n\nLokalizacja: {self.db.db_dir}")
+            
+            # Wyłącz przycisk po zapisie
+            self.save_db_btn.setEnabled(False)
+            
+        except Exception as e:
+            logger.error(f"Error saving to database: {e}")
+            QMessageBox.critical(self, "Błąd", f"Nie udało się zapisać do bazy:\n{str(e)}")
+            self.status_bar.set_status(f"Błąd zapisu: {str(e)}", "❌")
+    
+    def closeEvent(self, event):
+        """Obsługuje zamknięcie aplikacji - zamyka bazę danych."""
+        if self.db is not None:
+            try:
+                self.db.close()
+                logger.info("Database closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing database: {e}")
+        event.accept()
+    
+    def show_history(self):
+        """Wyświetla okno historii z bazą danych."""
+        if self.db is None:
+            QMessageBox.warning(self, "Baza niedostępna", "Baza danych nie jest dostępna")
+            return
+        
+        dialog = HistoryDialog(self, self.db)
+        dialog.exec()
+
+
+class HistoryDialog(QDialog):
+    """Okno dialogowe do przeglądania historii analiz z bazą danych."""
+    
+    def __init__(self, parent, database):
+        super().__init__(parent)
+        
+        self.db = database
+        self.setWindowTitle("Historia analiz")
+        self.setMinimumSize(1200, 700)
+        self.setStyleSheet(DARK_STYLE)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+        
+        # ===== HEADER =====
+        header = QVBoxLayout()
+        title = QLabel("📋 Historia analiz")
+        title.setStyleSheet("font-size: 24px; font-weight: 700; color: #f0f6fc;")
+        header.addWidget(title)
+        layout.addLayout(header)
+        
+        # ===== FILTERS =====
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(12)
+        
+        filter_label = QLabel("Filtruj:")
+        filter_label.setStyleSheet("color: #8b949e; font-weight: 600;")
+        filter_layout.addWidget(filter_label)
+        
+        self.brand_filter = QLineEdit()
+        self.brand_filter.setPlaceholderText("Filtruj po marce...")
+        self.brand_filter.setMaximumWidth(200)
+        self.brand_filter.setStyleSheet("""
+            QLineEdit {
+                background-color: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 8px;
+                color: #c9d1d9;
+            }
+            QLineEdit:focus {
+                border: 1px solid #58a6ff;
+            }
+        """)
+        self.brand_filter.textChanged.connect(self.refresh_table)
+        filter_layout.addWidget(self.brand_filter)
+        
+        self.plate_filter = QLineEdit()
+        self.plate_filter.setPlaceholderText("Filtruj po tablicy...")
+        self.plate_filter.setMaximumWidth(200)
+        self.plate_filter.setStyleSheet("""
+            QLineEdit {
+                background-color: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 8px;
+                color: #c9d1d9;
+            }
+            QLineEdit:focus {
+                border: 1px solid #58a6ff;
+            }
+        """)
+        self.plate_filter.textChanged.connect(self.refresh_table)
+        filter_layout.addWidget(self.plate_filter)
+        
+        filter_layout.addStretch()
+        
+        layout.addLayout(filter_layout)
+        
+        # ===== STATISTICS =====
+        stats_layout = QHBoxLayout()
+        stats_layout.setSpacing(16)
+        
+        self.stats_label = QLabel("")
+        self.stats_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        stats_layout.addWidget(self.stats_label)
+        stats_layout.addStretch()
+        
+        layout.addLayout(stats_layout)
+        
+        # ===== TABLE =====
+        self.table = QTableWidget()
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels([
+            "ID", "Data/Czas", "Marka", "Pewność %", "Tablica", "Tablica Pewność %", "Auto", "Tablica"
+        ])
+        
+        # Stylowanie tabeli
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                gridline-color: #30363d;
+            }
+            QTableWidget::item {
+                padding: 8px;
+                color: #c9d1d9;
+            }
+            QTableWidget::item:selected {
+                background-color: #238636;
+            }
+            QHeaderView::section {
+                background-color: #0d1117;
+                color: #f0f6fc;
+                padding: 8px;
+                border: none;
+                border-right: 1px solid #30363d;
+                font-weight: 600;
+            }
+        """)
+        
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        
+        layout.addWidget(self.table)
+        
+        # ===== BUTTONS =====
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(12)
+        
+        refresh_btn = QPushButton("🔄 Odśwież")
+        refresh_btn.setProperty("class", "secondary")
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.clicked.connect(self.refresh_table)
+        button_layout.addWidget(refresh_btn)
+        
+        export_btn = QPushButton("📥 Eksportuj CSV")
+        export_btn.setProperty("class", "accent")
+        export_btn.setCursor(Qt.PointingHandCursor)
+        export_btn.clicked.connect(self.export_to_csv)
+        button_layout.addWidget(export_btn)
+        
+        delete_btn = QPushButton("🗑️ Usuń zaznaczone")
+        delete_btn.setProperty("class", "danger")
+        delete_btn.setCursor(Qt.PointingHandCursor)
+        delete_btn.clicked.connect(self.delete_selected)
+        button_layout.addWidget(delete_btn)
+        
+        button_layout.addStretch()
+        
+        close_btn = QPushButton("Zamknij")
+        close_btn.setProperty("class", "secondary")
+        close_btn.setFixedWidth(120)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(self.close)
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Załaduj dane
+        self.refresh_table()
+    
+    def refresh_table(self):
+        """Odświeża tabelę z danymi z bazy."""
+        try:
+            self.table.setRowCount(0)
+            
+            brand_filter = self.brand_filter.text().strip().upper()
+            plate_filter = self.plate_filter.text().strip().upper()
+            
+            # Pobierz wszystkie dane z bazy
+            detections = self.db.get_all_detections(limit=1000)
+            
+            # Filtruj
+            filtered = detections
+            if brand_filter:
+                filtered = [d for d in filtered if d['car_brand'] and brand_filter in d['car_brand'].upper()]
+            if plate_filter:
+                filtered = [d for d in filtered if d['plate_text'] and plate_filter in d['plate_text'].upper()]
+            
+            # Aktualizuj statystyki
+            total = len(detections)
+            with_car = sum(1 for d in detections if d['car_detected'])
+            with_plate = sum(1 for d in detections if d['plate_detected'])
+            self.stats_label.setText(f"Łącznie: {total} | Z pojazdem: {with_car} | Z tablicą: {with_plate} | Filtrowano: {len(filtered)}")
+            
+            # Dodaj wiersze do tabeli
+            for detection in filtered:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                
+                # ID
+                item_id = QTableWidgetItem(str(detection['id']))
+                self.table.setItem(row, 0, item_id)
+                
+                # Data/Czas
+                timestamp = detection['timestamp'][:16] if detection['timestamp'] else ''
+                item_time = QTableWidgetItem(timestamp)
+                self.table.setItem(row, 1, item_time)
+                
+                # Marka
+                brand = detection['car_brand'] or '---'
+                item_brand = QTableWidgetItem(brand)
+                self.table.setItem(row, 2, item_brand)
+                
+                # Pewność marki
+                brand_conf = f"{detection['brand_confidence']*100:.1f}%" if detection['brand_confidence'] else '0%'
+                item_brand_conf = QTableWidgetItem(brand_conf)
+                self.table.setItem(row, 3, item_brand_conf)
+                
+                # Tablica
+                plate = detection['plate_text'] or '---'
+                item_plate = QTableWidgetItem(plate)
+                self.table.setItem(row, 4, item_plate)
+                
+                # Pewność tablicy
+                plate_conf = f"{detection['plate_confidence']*100:.1f}%" if detection['plate_confidence'] else '0%'
+                item_plate_conf = QTableWidgetItem(plate_conf)
+                self.table.setItem(row, 5, item_plate_conf)
+                
+                # Auto (binary indicator)
+                car_icon = "✅" if detection['car_detected'] else "❌"
+                item_car = QTableWidgetItem(car_icon)
+                self.table.setItem(row, 6, item_car)
+                
+                # Tablica (binary indicator)
+                plate_icon = "✅" if detection['plate_detected'] else "❌"
+                item_plt = QTableWidgetItem(plate_icon)
+                self.table.setItem(row, 7, item_plt)
+            
+            logger.info(f"Loaded {len(filtered)} detections")
+            
+        except Exception as e:
+            logger.error(f"Error loading history: {e}")
+            QMessageBox.critical(self, "Błąd", f"Nie udało się załadować historii:\n{str(e)}")
+    
+    def export_to_csv(self):
+        """Eksportuje dane do pliku CSV."""
+        try:
+            filepath, _ = QFileDialog.getSaveFileName(
+                self, "Eksportuj do CSV", "", "CSV Files (*.csv)"
+            )
+            
+            if not filepath:
+                return
+            
+            self.db.export_to_csv(filepath)
+            QMessageBox.information(self, "Sukces", f"Dane zostały wyeksportowane do:\n{filepath}")
+            
+        except Exception as e:
+            logger.error(f"Error exporting: {e}")
+            QMessageBox.critical(self, "Błąd", f"Nie udało się wyeksportować:\n{str(e)}")
+    
+    def delete_selected(self):
+        """Usuwa zaznaczone rekordy z bazy."""
+        selected_rows = self.table.selectedIndexes()
+        if not selected_rows:
+            QMessageBox.warning(self, "Brak zaznaczenia", "Zaznacz rekordy do usunięcia")
+            return
+        
+        # Pobierz unikalne wiersze
+        rows = set(idx.row() for idx in selected_rows)
+        
+        reply = QMessageBox.question(
+            self, "Potwierdzenie",
+            f"Czy na pewno usunąć {len(rows)} rekord(ów)?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.No:
+            return
+        
+        try:
+            for row in sorted(rows, reverse=True):
+                detection_id = int(self.table.item(row, 0).text())
+                self.db.delete_detection(detection_id)
+            
+            QMessageBox.information(self, "Sukces", f"Usunięto {len(rows)} rekord(ów)")
+            self.refresh_table()
+            
+        except Exception as e:
+            logger.error(f"Error deleting: {e}")
+            QMessageBox.critical(self, "Błąd", f"Nie udało się usunąć:\n{str(e)}")
 
 
 class HeatmapDialog(QDialog):
