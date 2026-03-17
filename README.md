@@ -1,4 +1,4 @@
-# REBUILD - Aplikacja do rozpoznawania pojazdów
+# REBUILD - CarVision AI
 
 Desktopowa aplikacja z graficznym interfejsem użytkownika do automatycznej analizy samochodów na zdjęciach.
 
@@ -12,20 +12,27 @@ Desktopowa aplikacja z graficznym interfejsem użytkownika do automatycznej anal
 ### Klasyfikacja marki
 - Rozpoznawanie marki pojazdu przy użyciu modelu MobileNetV2
 - Obsługiwane marki: **AUDI, BMW, MERCEDES, PORSCHE, VOLKSWAGEN**
-- Wyświetlanie pewności predykcji (w procentach)
+- Wyświetlanie pewności predykcji z kolorowym wskaźnikiem (zielony / żółty / czerwony)
+- Grad-CAM — mapa ciepła pokazująca obszary decydujące o klasyfikacji
 
 ### ANPR – rozpoznawanie tablic rejestracyjnych
 - Wykrywanie tablicy na obrazie (własny model YOLOv8 – `anpr_best.pt`)
 - Odczyt tekstu z tablicy przez PaddleOCR
 - Obsługa tablic europejskich (polskie, niemieckie itp.)
-- Wycięcie i wyświetlenie wykrytej tablicy
+- Wycięcie i wyświetlenie wykrytej tablicy wraz z pewnością odczytu
+
+### Baza danych
+- Zapis wyników analizy do lokalnej bazy SQLite (`~/.carvision/database.db`)
+- Przechowywanie obrazów (oryginał, crop auta) oraz wyników (marka, tablica, pewność)
+- Przeglądanie historii analiz z filtrowaniem po marce i numerze tablicy
 
 ### Interfejs graficzny (GUI)
 - Ciemny motyw (dark theme) oparty na PySide6
-- Wczytywanie obrazu przez dialog wyboru pliku
-- Wyświetlanie: oryginalnego obrazu z bbox, cropu auta, cropu tablicy
-- Wyniki tekstowe: marka, pewność, numer tablicy
-- Przetwarzanie w osobnym wątku (UI nie zawiesza się podczas analizy)
+- Kliknięcie na obszar obrazu otwiera dialog wyboru pliku — analiza uruchamia się automatycznie po wczytaniu
+- Hamburger menu wysuwane animacją z góry w dół, z zaokrąglonymi narożnikami
+- Wyniki: marka + pewność, tablica rejestracyjna w stylu fizycznej tablicy
+- Panel „Cropy" — osobne okno z widokiem detekcji, wyciętego auta i tablicy
+- Przetwarzanie w osobnych wątkach — UI nie zawiesza się podczas analizy
 
 ## Uruchomienie
 
@@ -61,13 +68,18 @@ car_vision_app/
 ├── main.py              # Punkt wejścia, parsowanie argumentów
 ├── gui.py               # Interfejs graficzny (PySide6, dark theme)
 ├── detection.py         # Detekcja pojazdów (YOLOv8s)
-├── classification.py    # Klasyfikacja marki (MobileNetV2)
+├── classification.py    # Klasyfikacja marki (MobileNetV2) + Grad-CAM
 ├── anpr.py              # ANPR: wykrywanie tablicy + OCR (PaddleOCR)
+├── database.py          # Baza danych SQLite (historia, obrazy)
 ├── anpr_best.pt         # Model wykrywania tablic (YOLOv8)
 └── yolov8s.pt           # Model detekcji ogólnej (YOLOv8s)
 
 car_detector_model/
 ├── model.pth            # Wagi modelu MobileNetV2
 └── label_map.json       # Mapowanie klas (AUDI, BMW, MERCEDES, PORSCHE, VOLKSWAGEN)
+
+~/.carvision/            # Dane użytkownika (tworzone automatycznie)
+├── database.db          # Baza SQLite z historią analiz
+└── images/              # Zapisane obrazy z analiz
 ```
 
