@@ -1,0 +1,24 @@
+
+# Wymagania dla aplikacji rozpoznawania pojazdów
+# Python 3.10+
+
+# Framework GUI
+PySide6>=6.5.0
+
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Computer Vision
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# YOLO
+ultralytics>=8.0.114
+
+# OCR
+paddlepaddle
+paddleocr
+
+# Dodatkowe
+Pillow>=10.0.0
