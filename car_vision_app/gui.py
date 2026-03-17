@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QGraphicsDropShadowEffect, QSizePolicy, QSpacerItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QLineEdit
 )
-from PySide6.QtCore import Qt, QThread, Signal, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap, QImage, QFont, QColor
 
 try:
@@ -42,93 +42,96 @@ except ImportError:
 
 
 # ==================== STYLE SHEET ====================
+# Layer 0 (bg):      #111827  — najciemniejsze, tło okna
+# Layer 1 (card):    #1f2937  — karty, wyraźnie jaśniejsze
+# Layer 2 (inset):   #111827  — zagłębienia wewnątrz kart (powrót do bg)
 DARK_STYLE = """
 /* Main Window */
 QMainWindow {
-    background-color: #0a0e27;
+    background-color: #111827;
 }
 
 QWidget {
-    background-color: #0a0e27;
-    color: #e8eef5;
+    background-color: #111827;
+    color: #e2e8f0;
     font-family: 'Segoe UI', 'SF Pro Display', -apple-system, sans-serif;
 }
 
 /* Cards */
 QFrame[class="card"] {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #0f1628, stop:1 #0d1420);
-    border: 1px solid #1e293b;
-    border-radius: 20px;
+    background-color: #1f2937;
+    border: none;
+    border-radius: 16px;
     padding: 16px;
 }
 
 /* Labels */
 QLabel {
-    color: #e8eef5;
+    color: #e2e8f0;
     background-color: transparent;
 }
 
 QLabel[class="title"] {
     font-size: 28px;
     font-weight: 700;
-    color: #ffffff;
+    color: #f9fafb;
     background-color: transparent;
     letter-spacing: -0.5px;
 }
 
 QLabel[class="subtitle"] {
     font-size: 14px;
-    color: #94a3b8;
+    color: #9ca3af;
     background-color: transparent;
 }
 
 QLabel[class="section-title"] {
-    font-size: 16px;
+    font-size: 13px;
     font-weight: 700;
-    color: #f1f5f9;
+    color: #9ca3af;
     background-color: transparent;
-    padding: 12px 0px;
+    padding: 8px 0px;
+    letter-spacing: 1px;
 }
 
 QLabel[class="result-value"] {
-    font-size: 36px;
+    font-size: 34px;
     font-weight: 800;
-    color: #06b6d4;
+    color: #38bdf8;
     background-color: transparent;
-    padding: 8px;
-    border-radius: 12px;
+    padding: 4px;
+    border-radius: 8px;
     letter-spacing: -1px;
 }
 
 QLabel[class="result-label"] {
-    font-size: 11px;
-    color: #64748b;
+    font-size: 10px;
+    color: #6b7280;
     background-color: transparent;
     text-transform: uppercase;
     letter-spacing: 1.5px;
-    font-weight: 600;
+    font-weight: 700;
 }
 
 /* Buttons */
 QPushButton {
     border: none;
-    border-radius: 12px;
-    padding: 14px 28px;
-    font-size: 14px;
+    border-radius: 10px;
+    padding: 12px 24px;
+    font-size: 13px;
     font-weight: 700;
     letter-spacing: 0.3px;
     min-height: 20px;
 }
 
 QPushButton[class="primary"] {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 #059669, stop:1 #10b981);
     color: white;
 }
 
 QPushButton[class="primary"]:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 #10b981, stop:1 #34d399);
 }
 
@@ -137,70 +140,69 @@ QPushButton[class="primary"]:pressed {
 }
 
 QPushButton[class="primary"]:disabled {
-    background: #1e293b;
-    color: #475569;
+    background: #374151;
+    color: #6b7280;
 }
 
 QPushButton[class="secondary"] {
-    background: #1e293b;
-    color: #cbd5e1;
-    border: 1px solid #334155;
+    background: #374151;
+    color: #d1d5db;
+    border: none;
 }
 
 QPushButton[class="secondary"]:hover {
-    background: #334155;
-    border-color: #64748b;
-    color: #e2e8f0;
+    background: #4b5563;
+    color: #f3f4f6;
 }
 
 QPushButton[class="secondary"]:pressed {
-    background: #0f172a;
+    background: #1f2937;
 }
 
 QPushButton[class="accent"] {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #0ea5e9, stop:1 #06b6d4);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #0284c7, stop:1 #06b6d4);
     color: white;
 }
 
 QPushButton[class="accent"]:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 #06b6d4, stop:1 #22d3ee);
 }
 
 QPushButton[class="accent"]:disabled {
-    background: #1e293b;
-    color: #475569;
+    background: #374151;
+    color: #6b7280;
 }
 
 QPushButton[class="danger"] {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #ef4444, stop:1 #f87171);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #dc2626, stop:1 #ef4444);
     color: white;
 }
 
 QPushButton[class="danger"]:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #f87171, stop:1 #fca5a5);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #ef4444, stop:1 #f87171);
 }
 
 /* Scrollbar */
 QScrollBar:vertical {
     background: transparent;
-    width: 10px;
-    border-radius: 5px;
+    width: 8px;
+    border-radius: 4px;
     margin: 0px;
 }
 
 QScrollBar::handle:vertical {
-    background: #475569;
-    border-radius: 5px;
+    background: #4b5563;
+    border-radius: 4px;
     min-height: 40px;
     border: none;
 }
 
 QScrollBar::handle:vertical:hover {
-    background: #64748b;
+    background: #6b7280;
 }
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
@@ -210,21 +212,20 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 
 /* Message Box */
 QMessageBox {
-    background-color: #0f1628;
-    border: 1px solid #1e293b;
-    border-radius: 16px;
+    background-color: #1f2937;
+    border: none;
+    border-radius: 12px;
 }
 
 QMessageBox QLabel {
-    color: #e8eef5;
+    color: #e2e8f0;
     background-color: transparent;
 }
 
 /* Dialog */
 QDialog {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #0f1628, stop:1 #0d1420);
-    border-radius: 16px;
+    background-color: #111827;
+    border-radius: 12px;
 }
 """
 
@@ -328,17 +329,49 @@ class ANPRWorker(QThread):
             self.error.emit(str(e))
 
 
+class ScaledLabel(QLabel):
+    """QLabel ktory automatycznie skaluje pixmap do swojego rozmiaru zachowujac proporcje."""
+
+    def __init__(self):
+        super().__init__()
+        self._source_pixmap = None
+        self.setAlignment(Qt.AlignCenter)
+
+    def setPixmap(self, pixmap: QPixmap):
+        self._source_pixmap = pixmap
+        self._apply_scaled()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_scaled()
+
+    def _apply_scaled(self):
+        if self._source_pixmap and not self._source_pixmap.isNull():
+            scaled = self._source_pixmap.scaled(
+                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            super().setPixmap(scaled)
+
+    def clear(self):
+        self._source_pixmap = None
+        super().clear()
+
+
 class ImageCard(QFrame):
     """Nowoczesna karta do wyświetlania obrazu."""
-    
+
+    clicked = Signal()
+
     def __init__(self, title: str = "", placeholder: str = ""):
         super().__init__()
+        self._clickable = False
         self.setProperty("class", "card")
         self.setMinimumSize(280, 200)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         
         if title:
             self.title_label = QLabel(title)
@@ -348,29 +381,30 @@ class ImageCard(QFrame):
         self.image_container = QFrame()
         self.image_container.setStyleSheet("""
             QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #0f172a, stop:1 #0a0e27);
-                border: 2px dashed #334155;
-                border-radius: 14px;
+                background-color: #111827;
+                border: none;
+                border-radius: 12px;
             }
         """)
-        self.image_container.setMinimumHeight(150)
+        self.image_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         img_layout = QVBoxLayout(self.image_container)
+        img_layout.setContentsMargins(4, 4, 4, 4)
         img_layout.setAlignment(Qt.AlignCenter)
         
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label = ScaledLabel()
+        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.placeholder_text = placeholder
         
         self.placeholder_label = QLabel(placeholder)
         self.placeholder_label.setStyleSheet("color: #64748b; font-size: 13px; font-weight: 500;")
         self.placeholder_label.setAlignment(Qt.AlignCenter)
+        self.placeholder_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         img_layout.addWidget(self.image_label)
         img_layout.addWidget(self.placeholder_label)
         
-        layout.addWidget(self.image_container)
+        layout.addWidget(self.image_container, 1)
         
         shadow = QGraphicsDropShadowEffect()
         shadow.setBlurRadius(24)
@@ -378,29 +412,39 @@ class ImageCard(QFrame):
         shadow.setYOffset(8)
         shadow.setColor(QColor(0, 0, 0, 80))
         self.setGraphicsEffect(shadow)
-    
+
+    def set_clickable(self, enabled: bool):
+        self._clickable = enabled
+        self.setCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor)
+
+    def enterEvent(self, event):
+        if self._clickable and self.isEnabled():
+            self.setStyleSheet("""
+                QFrame {
+                    background-color: #253347;
+                    border: none;
+                    border-radius: 16px;
+                }
+            """)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if self._clickable:
+            self.setStyleSheet("")
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self._clickable and self.isEnabled():
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
     def set_image(self, pixmap: QPixmap):
         self.image_label.setPixmap(pixmap)
         self.placeholder_label.hide()
-        self.image_container.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #0f172a, stop:1 #0a0e27);
-                border: 2px solid #06b6d4;
-                border-radius: 14px;
-            }
-        """)
     
     def clear_image(self):
         self.image_label.clear()
         self.placeholder_label.show()
-        self.image_container.setStyleSheet("""
-            QFrame {
-                background-color: #0d1117;
-                border: 2px dashed #30363d;
-                border-radius: 8px;
-            }
-        """)
 
 
 class ResultCard(QFrame):
@@ -473,7 +517,7 @@ class PlateCard(QFrame):
             QFrame {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #ffffff, stop:0.5 #f8f8f8, stop:1 #eeeeee);
-                border: 3px solid #1a1a2e;
+                border: none;
                 border-radius: 6px;
                 min-height: 60px;
             }
@@ -482,15 +526,6 @@ class PlateCard(QFrame):
         plate_layout = QHBoxLayout(self.plate_frame)
         plate_layout.setContentsMargins(8, 8, 8, 8)
         
-        eu_strip = QLabel("🇪🇺")
-        eu_strip.setStyleSheet("""
-            background-color: #003399;
-            color: white;
-            font-size: 20px;
-            padding: 8px 4px;
-            border-radius: 3px;
-        """)
-        plate_layout.addWidget(eu_strip)
         
         self.plate_text = QLabel("---")
         self.plate_text.setStyleSheet("""
@@ -530,6 +565,24 @@ class PlateCard(QFrame):
         self.confidence_label.setText("")
 
 
+class HamburgerButton(QPushButton):
+    """Przycisk z trzema kreskami (hamburger menu)."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        from PySide6.QtGui import QPainter, QPen
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#e2e8f0"), 2.5)
+        p.setPen(pen)
+        w, h = self.width(), self.height()
+        cx = w // 2
+        for dy in (-6, 0, 6):
+            y = h // 2 + dy
+            p.drawLine(cx - 9, y, cx + 9, y)
+        p.end()
+
+
 class StatusBar(QFrame):
     """Pasek statusu."""
     
@@ -537,9 +590,9 @@ class StatusBar(QFrame):
         super().__init__()
         self.setStyleSheet("""
             QFrame {
-                background-color: #161b22;
-                border: 1px solid #30363d;
-                border-radius: 8px;
+                background-color: #1f2937;
+                border: none;
+                border-radius: 10px;
             }
         """)
         self.setFixedHeight(50)
@@ -570,6 +623,35 @@ class StatusBar(QFrame):
             self.progress_text.setText("")
 
 
+class CropsWindow(QDialog):
+    """Niemodalny panel z cropami detekcji, wyćcia i tablicy."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Podgląd crops")
+        self.setMinimumSize(800, 340)
+        self.setStyleSheet(DARK_STYLE)
+        self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
+
+        self.detection_card = ImageCard("DETEKCJA", "Wykryty pojazd")
+        layout.addWidget(self.detection_card)
+
+        self.crop_card = ImageCard("WYCIĘCIE", "Crop do analizy")
+        layout.addWidget(self.crop_card)
+
+        self.plate_crop_card = ImageCard("TABLICA", "Crop tablicy")
+        layout.addWidget(self.plate_crop_card)
+
+    def clear_all(self):
+        self.detection_card.clear_image()
+        self.crop_card.clear_image()
+        self.plate_crop_card.clear_image()
+
+
 class MainWindow(QMainWindow):
     """Główne okno aplikacji."""
     
@@ -596,6 +678,11 @@ class MainWindow(QMainWindow):
         
         self.last_car_crop = None
         self.last_brand = None
+        self.crops_window = None
+        self._last_annotated = None
+        self._last_car_crop_img = None
+        self._last_plate_crop = None
+        self._last_car_crop_with_plate = None
         
         self.init_ui()
         self.load_models()
@@ -603,122 +690,194 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Inicjalizacja interfejsu użytkownika."""
         self.setWindowTitle("CarVision AI")
-        self.setMinimumSize(1400, 900)
-        
+        self.setMinimumSize(900, 600)
+
         central = QWidget()
         self.setCentralWidget(central)
-        
+
+        # ===== MAIN AREA (cały central) =====
         main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(24, 24, 24, 24)
-        main_layout.setSpacing(20)
-        
-        # ===== HEADER =====
-        header = QHBoxLayout()
-        
-        title_section = QVBoxLayout()
-        title = QLabel("🚗 CarVision AI")
-        title.setProperty("class", "title")
-        title_section.addWidget(title)
-        
-        subtitle = QLabel("Rozpoznawanie marki i tablicy rejestracyjnej")
-        subtitle.setProperty("class", "subtitle")
-        title_section.addWidget(subtitle)
-        
-        header.addLayout(title_section)
-        header.addStretch()
-        
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(12)
-        
-        self.load_btn = QPushButton("  📁  Wczytaj zdjęcie")
-        self.load_btn.setProperty("class", "secondary")
-        self.load_btn.setMinimumSize(160, 44)
-        self.load_btn.setCursor(Qt.PointingHandCursor)
-        self.load_btn.clicked.connect(self.load_image)
-        btn_layout.addWidget(self.load_btn)
-        
-        self.analyze_btn = QPushButton("  🔍  Analizuj")
-        self.analyze_btn.setProperty("class", "primary")
-        self.analyze_btn.setMinimumSize(140, 44)
-        self.analyze_btn.setCursor(Qt.PointingHandCursor)
-        self.analyze_btn.setEnabled(False)
-        self.analyze_btn.clicked.connect(self.analyze_image)
-        btn_layout.addWidget(self.analyze_btn)
-        
-        self.heatmap_btn = QPushButton("  🔥  Mapa ciepła")
-        self.heatmap_btn.setProperty("class", "accent")
-        self.heatmap_btn.setMinimumSize(140, 44)
-        self.heatmap_btn.setCursor(Qt.PointingHandCursor)
-        self.heatmap_btn.setEnabled(False)
-        self.heatmap_btn.clicked.connect(self.show_heatmap)
-        btn_layout.addWidget(self.heatmap_btn)
-        
-        self.save_db_btn = QPushButton("  💾  Zapisz do bazy")
-        self.save_db_btn.setProperty("class", "secondary")
-        self.save_db_btn.setMinimumSize(140, 44)
-        self.save_db_btn.setCursor(Qt.PointingHandCursor)
-        self.save_db_btn.setEnabled(False)
-        self.save_db_btn.clicked.connect(self.save_to_database)
-        btn_layout.addWidget(self.save_db_btn)
-        
-        self.history_btn = QPushButton("  📋  Historia")
-        self.history_btn.setProperty("class", "secondary")
-        self.history_btn.setMinimumSize(140, 44)
-        self.history_btn.setCursor(Qt.PointingHandCursor)
-        self.history_btn.clicked.connect(self.show_history)
-        btn_layout.addWidget(self.history_btn)
-        
-        header.addLayout(btn_layout)
-        main_layout.addLayout(header)
-        
+        main_layout.setContentsMargins(20, 16, 20, 16)
+        main_layout.setSpacing(16)
+
+        # ===== TOP BAR =====
+        self.top_bar_widget = QWidget()
+        self.top_bar_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        top_bar = QHBoxLayout(self.top_bar_widget)
+        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.setSpacing(14)
+
+        self.hamburger_btn = HamburgerButton()
+        self.hamburger_btn.setFixedSize(44, 44)
+        self.hamburger_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #374151;
+                border: none;
+                border-radius: 10px;
+            }
+            QPushButton:hover { background-color: #4b5563; }
+            QPushButton:pressed { background-color: #1f2937; }
+        """)
+        self.hamburger_btn.setCursor(Qt.PointingHandCursor)
+        self.hamburger_btn.clicked.connect(self.toggle_sidebar)
+        top_bar.addWidget(self.hamburger_btn)
+
+        title_lbl = QLabel("🚗 CarVision AI")
+        title_lbl.setProperty("class", "title")
+        top_bar.addWidget(title_lbl)
+
+        subtitle_lbl = QLabel("Rozpoznawanie marki i tablicy rejestracyjnej")
+        subtitle_lbl.setProperty("class", "subtitle")
+        subtitle_lbl.setAlignment(Qt.AlignVCenter)
+        top_bar.addWidget(subtitle_lbl)
+
+        top_bar.addStretch()
+        main_layout.addWidget(self.top_bar_widget)
+
         # ===== CONTENT =====
         content = QHBoxLayout()
         content.setSpacing(20)
-        
-        # LEFT: Images
-        left_panel = QVBoxLayout()
-        left_panel.setSpacing(16)
-        
-        self.input_card = ImageCard("OBRAZ WEJŚCIOWY", "Przeciągnij lub wczytaj zdjęcie")
-        self.input_card.setMinimumSize(400, 300)
-        left_panel.addWidget(self.input_card)
-        
-        images_row = QHBoxLayout()
-        images_row.setSpacing(16)
-        
-        self.detection_card = ImageCard("DETEKCJA", "Wykryty pojazd")
-        images_row.addWidget(self.detection_card)
-        
-        self.crop_card = ImageCard("WYCIĘCIE", "Crop do analizy")
-        images_row.addWidget(self.crop_card)
-        
-        left_panel.addLayout(images_row)
-        content.addLayout(left_panel, 2)
-        
+
+        self.input_card = ImageCard("OBRAZ WEJŚCIOWY", "Kliknij, aby wczytać zdjęcie")
+        self.input_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.input_card.set_clickable(True)
+        self.input_card.clicked.connect(self.load_image)
+        content.addWidget(self.input_card, 3)
+
         # RIGHT: Results
         right_panel = QVBoxLayout()
         right_panel.setSpacing(16)
-        
+
         self.brand_card = ResultCard("🏎️", "MARKA POJAZDU", "#58a6ff")
         self.brand_card.setMinimumHeight(140)
-        right_panel.addWidget(self.brand_card)
-        
+        self.brand_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_panel.addWidget(self.brand_card, 1)
+
         self.plate_card = PlateCard()
         self.plate_card.setMinimumHeight(160)
-        right_panel.addWidget(self.plate_card)
-        
-        self.plate_crop_card = ImageCard("TABLICA", "Crop tablicy")
-        self.plate_crop_card.setMinimumHeight(120)
-        right_panel.addWidget(self.plate_crop_card)
-        
-        right_panel.addStretch()
+        self.plate_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_panel.addWidget(self.plate_card, 1)
+
         content.addLayout(right_panel, 1)
-        
-        main_layout.addLayout(content)
-        
+        main_layout.addLayout(content, 1)
+
         # ===== STATUS BAR =====
         self.status_bar = StatusBar()
         main_layout.addWidget(self.status_bar)
+
+        # ===== SIDEBAR OVERLAY (nad contentem, pozycjonowany absolutnie) =====
+        self.sidebar = QFrame(central)
+        self.sidebar.setFixedWidth(220)
+        self.sidebar.setVisible(False)
+        self.sidebar.setStyleSheet("""
+            QFrame {
+                background-color: #1a2333;
+                border-top-right-radius: 20px;
+                border-bottom-right-radius: 20px;
+            }
+        """)
+
+        sidebar_shadow = QGraphicsDropShadowEffect()
+        sidebar_shadow.setBlurRadius(32)
+        sidebar_shadow.setXOffset(8)
+        sidebar_shadow.setYOffset(0)
+        sidebar_shadow.setColor(QColor(0, 0, 0, 120))
+        self.sidebar.setGraphicsEffect(sidebar_shadow)
+        self.sidebar.raise_()
+
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(16, 24, 16, 24)
+        sidebar_layout.setSpacing(10)
+
+        sidebar_title = QLabel("Menu")
+        sidebar_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #6b7280; letter-spacing: 1px;")
+        sidebar_layout.addWidget(sidebar_title)
+
+        self.heatmap_btn = QPushButton("🔥  Mapa ciepła")
+        self.heatmap_btn.setProperty("class", "accent")
+        self.heatmap_btn.setMinimumHeight(44)
+        self.heatmap_btn.setCursor(Qt.PointingHandCursor)
+        self.heatmap_btn.setEnabled(False)
+        self.heatmap_btn.clicked.connect(self.show_heatmap)
+        sidebar_layout.addWidget(self.heatmap_btn)
+
+        self.crops_btn = QPushButton("🖼️  Cropy")
+        self.crops_btn.setProperty("class", "secondary")
+        self.crops_btn.setMinimumHeight(44)
+        self.crops_btn.setCursor(Qt.PointingHandCursor)
+        self.crops_btn.clicked.connect(self.toggle_crops_window)
+        sidebar_layout.addWidget(self.crops_btn)
+
+        sidebar_layout.addSpacing(16)
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background-color: #374151;")
+        sidebar_layout.addWidget(sep)
+        sidebar_layout.addSpacing(8)
+
+        self.save_db_btn = QPushButton("💾  Zapisz do bazy")
+        self.save_db_btn.setProperty("class", "secondary")
+        self.save_db_btn.setMinimumHeight(44)
+        self.save_db_btn.setCursor(Qt.PointingHandCursor)
+        self.save_db_btn.setEnabled(False)
+        self.save_db_btn.clicked.connect(self.save_to_database)
+        sidebar_layout.addWidget(self.save_db_btn)
+
+        self.history_btn = QPushButton("📋  Historia")
+        self.history_btn.setProperty("class", "secondary")
+        self.history_btn.setMinimumHeight(44)
+        self.history_btn.setCursor(Qt.PointingHandCursor)
+        self.history_btn.clicked.connect(self.show_history)
+        sidebar_layout.addWidget(self.history_btn)
+
+        sidebar_layout.addStretch()
+
+    def _sidebar_y(self):
+        """Y od którego zaczyna się sidebar (poniżej top bar)."""
+        return self.top_bar_widget.geometry().bottom() + 1
+
+    def _sidebar_target_height(self):
+        """Wysokość sidebara = do końca ostatniego przycisku + margines."""
+        self.sidebar.adjustSize()
+        return self.sidebar.sizeHint().height() + 16
+
+    def resizeEvent(self, event):
+        """Aktualizuje pozycję sidebara przy zmianie rozmiaru okna."""
+        super().resizeEvent(event)
+        if hasattr(self, 'sidebar') and hasattr(self, 'top_bar_widget'):
+            y = self._sidebar_y()
+            self.sidebar.move(0, y)
+            if self.sidebar.isVisible():
+                self.sidebar.setFixedHeight(self._sidebar_target_height())
+
+    def toggle_sidebar(self):
+        """Wysuwa / chowa panel boczny animacją z góry w dół."""
+        y = self._sidebar_y()
+        self.sidebar.move(0, y)
+        self.sidebar.raise_()
+
+        if not self.sidebar.isVisible():
+            target_h = self._sidebar_target_height()
+            self.sidebar.setFixedHeight(0)
+            self.sidebar.setVisible(True)
+            anim = QPropertyAnimation(self.sidebar, b"maximumHeight", self)
+            anim.setStartValue(0)
+            anim.setEndValue(target_h)
+            anim.setDuration(220)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.finished.connect(lambda: self.sidebar.setFixedHeight(target_h))
+            self._sidebar_anim = anim
+            anim.start()
+        else:
+            target_h = self.sidebar.height()
+            anim = QPropertyAnimation(self.sidebar, b"maximumHeight", self)
+            anim.setStartValue(target_h)
+            anim.setEndValue(0)
+            anim.setDuration(180)
+            anim.setEasingCurve(QEasingCurve.InCubic)
+            anim.finished.connect(lambda: self.sidebar.setVisible(False))
+            self._sidebar_anim = anim
+            anim.start()
     
     def load_models(self):
         """Ładuje modele do pamięci."""
@@ -755,24 +914,49 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Błąd", "Nie udało się wczytać obrazu.")
                 return
             
-            pixmap = cv2_to_qpixmap(self.current_image, max_width=500, max_height=350)
+            pixmap = cv2_to_qpixmap(self.current_image)
             self.input_card.set_image(pixmap)
             
             self.clear_results()
-            self.analyze_btn.setEnabled(True)
-            
             self.status_bar.set_status(f"Wczytano: {os.path.basename(file_path)}", "📷")
+            self.analyze_image()
     
+    def toggle_crops_window(self):
+        """Otwiera lub zamyka okno z cropami."""
+        if self.crops_window is None or not self.crops_window.isVisible():
+            if self.crops_window is None:
+                self.crops_window = CropsWindow(self)
+            # Uzupełnij okno ostatnimi wynikami jeśli istnieją
+            if self._last_annotated is not None:
+                pixmap = cv2_to_qpixmap(self._last_annotated, max_width=320, max_height=240)
+                self.crops_window.detection_card.set_image(pixmap)
+            if self._last_car_crop_with_plate is not None:
+                pixmap = cv2_to_qpixmap(self._last_car_crop_with_plate, max_width=320, max_height=240)
+                self.crops_window.crop_card.set_image(pixmap)
+            elif self._last_car_crop_img is not None:
+                pixmap = cv2_to_qpixmap(self._last_car_crop_img, max_width=320, max_height=240)
+                self.crops_window.crop_card.set_image(pixmap)
+            if self._last_plate_crop is not None:
+                pixmap = cv2_to_qpixmap(self._last_plate_crop, max_width=320, max_height=100)
+                self.crops_window.plate_crop_card.set_image(pixmap)
+            self.crops_window.show()
+            self.crops_window.raise_()
+        else:
+            self.crops_window.hide()
+
     def clear_results(self):
         """Czyści wyniki."""
-        self.detection_card.clear_image()
-        self.crop_card.clear_image()
-        self.plate_crop_card.clear_image()
+        if self.crops_window is not None:
+            self.crops_window.clear_all()
         self.brand_card.reset()
         self.plate_card.reset()
         self.heatmap_btn.setEnabled(False)
         self.last_car_crop = None
         self.last_brand = None
+        self._last_annotated = None
+        self._last_car_crop_img = None
+        self._last_plate_crop = None
+        self._last_car_crop_with_plate = None
     
     def analyze_image(self):
         """Uruchamia analizę."""
@@ -783,12 +967,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Błąd", "Modele nie są załadowane.")
             return
         
-        self.load_btn.setEnabled(False)
-        self.analyze_btn.setEnabled(False)
+        self.input_card.setEnabled(False)
         
         # Resetuj tablicę
         self.plate_card.reset()
-        self.plate_crop_card.clear_image()
+        if self.crops_window is not None:
+            self.crops_window.plate_crop_card.clear_image()
         
         self.worker = AnalysisWorker(
             self.current_image,
@@ -805,8 +989,7 @@ class MainWindow(QMainWindow):
     
     def on_analysis_finished(self, results: dict):
         """Obsługuje zakończenie analizy detekcji i marki."""
-        self.load_btn.setEnabled(True)
-        self.analyze_btn.setEnabled(True)
+        self.input_card.setEnabled(True)
         
         self.last_car_crop = results.get('car_crop')
         self.last_brand = results.get('brand')
@@ -814,15 +997,17 @@ class MainWindow(QMainWindow):
         if self.last_car_crop is not None:
             self.heatmap_btn.setEnabled(True)
         
-        # Wyświetl detekcję
+        # Zapisz i wyświetl detekcję i crop
         if results.get('annotated_image') is not None:
-            pixmap = cv2_to_qpixmap(results['annotated_image'], max_width=280, max_height=200)
-            self.detection_card.set_image(pixmap)
-        
-        # Wyświetl crop
+            self._last_annotated = results['annotated_image']
+            if self.crops_window is not None:
+                pixmap = cv2_to_qpixmap(self._last_annotated, max_width=320, max_height=240)
+                self.crops_window.detection_card.set_image(pixmap)
         if results.get('car_crop') is not None:
-            pixmap = cv2_to_qpixmap(results['car_crop'], max_width=280, max_height=200)
-            self.crop_card.set_image(pixmap)
+            self._last_car_crop_img = results['car_crop']
+            if self.crops_window is not None:
+                pixmap = cv2_to_qpixmap(self._last_car_crop_img, max_width=320, max_height=240)
+                self.crops_window.crop_card.set_image(pixmap)
         
         # Wyświetl markę
         brand = results.get('brand', '---')
@@ -864,13 +1049,15 @@ class MainWindow(QMainWindow):
         self.plate_card.set_plate(plate_text, plate_conf)
         
         if results.get('plate_crop') is not None:
-            pixmap = cv2_to_qpixmap(results['plate_crop'], max_width=250, max_height=80)
-            self.plate_crop_card.set_image(pixmap)
-        
-        # Aktualizuj crop z zaznaczoną tablicą
+            self._last_plate_crop = results['plate_crop']
+            if self.crops_window is not None:
+                pixmap = cv2_to_qpixmap(self._last_plate_crop, max_width=320, max_height=100)
+                self.crops_window.plate_crop_card.set_image(pixmap)
         if results.get('car_crop_with_plate') is not None:
-            pixmap = cv2_to_qpixmap(results['car_crop_with_plate'], max_width=280, max_height=200)
-            self.crop_card.set_image(pixmap)
+            self._last_car_crop_with_plate = results['car_crop_with_plate']
+            if self.crops_window is not None:
+                pixmap = cv2_to_qpixmap(self._last_car_crop_with_plate, max_width=320, max_height=240)
+                self.crops_window.crop_card.set_image(pixmap)
         
         self.status_bar.set_status("Analiza zakończona", "✅")
     
@@ -879,8 +1066,7 @@ class MainWindow(QMainWindow):
         self.status_bar.set_status(f"Błąd tablicy: {error}", "⚠️")
     
     def on_analysis_error(self, error: str):
-        self.load_btn.setEnabled(True)
-        self.analyze_btn.setEnabled(True)
+        self.input_card.setEnabled(True)
         QMessageBox.critical(self, "Błąd analizy", error)
         self.status_bar.set_status(f"Błąd: {error}", "❌")
     
@@ -1013,14 +1199,11 @@ class HistoryDialog(QDialog):
         self.brand_filter.setMaximumWidth(200)
         self.brand_filter.setStyleSheet("""
             QLineEdit {
-                background-color: #161b22;
-                border: 1px solid #30363d;
+                background-color: #374151;
+                border: none;
                 border-radius: 8px;
                 padding: 8px;
-                color: #c9d1d9;
-            }
-            QLineEdit:focus {
-                border: 1px solid #58a6ff;
+                color: #e2e8f0;
             }
         """)
         self.brand_filter.textChanged.connect(self.refresh_table)
@@ -1031,14 +1214,11 @@ class HistoryDialog(QDialog):
         self.plate_filter.setMaximumWidth(200)
         self.plate_filter.setStyleSheet("""
             QLineEdit {
-                background-color: #161b22;
-                border: 1px solid #30363d;
+                background-color: #374151;
+                border: none;
                 border-radius: 8px;
                 padding: 8px;
-                color: #c9d1d9;
-            }
-            QLineEdit:focus {
-                border: 1px solid #58a6ff;
+                color: #e2e8f0;
             }
         """)
         self.plate_filter.textChanged.connect(self.refresh_table)
@@ -1069,24 +1249,23 @@ class HistoryDialog(QDialog):
         # Stylowanie tabeli
         self.table.setStyleSheet("""
             QTableWidget {
-                background-color: #161b22;
-                border: 1px solid #30363d;
+                background-color: #1f2937;
+                border: none;
                 border-radius: 8px;
-                gridline-color: #30363d;
+                gridline-color: #374151;
             }
             QTableWidget::item {
                 padding: 8px;
-                color: #c9d1d9;
+                color: #d1d5db;
             }
             QTableWidget::item:selected {
-                background-color: #238636;
+                background-color: #065f46;
             }
             QHeaderView::section {
-                background-color: #0d1117;
-                color: #f0f6fc;
+                background-color: #111827;
+                color: #f9fafb;
                 padding: 8px;
                 border: none;
-                border-right: 1px solid #30363d;
                 font-weight: 600;
             }
         """)
@@ -1316,8 +1495,8 @@ class HeatmapDialog(QDialog):
         card = QFrame()
         card.setStyleSheet(f"""
             QFrame {{
-                background-color: #161b22;
-                border: 2px solid {border_color};
+                background-color: #1f2937;
+                border: none;
                 border-radius: 12px;
             }}
         """)
