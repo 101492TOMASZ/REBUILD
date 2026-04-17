@@ -11,34 +11,47 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-# Ustawienie dla PyTorch 2.6+
-import torch
-torch.serialization.add_safe_globals([])
-
 logger = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QFrame, QDialog,
     QMessageBox, QGraphicsDropShadowEffect, QSizePolicy, QSpacerItem,
-    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QLineEdit
+    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QLineEdit,
+    QProgressBar, QScrollArea
 )
-from PySide6.QtCore import Qt, QThread, Signal, QSize, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QPropertyAnimation, QEasingCurve, QUrl
 from PySide6.QtGui import QPixmap, QImage, QFont, QColor
 
-try:
-    from .detection import CarDetector
-    from .classification import BrandClassifier
-    from .anpr import ANPRModule
-    from .database import Database
-except ImportError:
-    current_dir = Path(__file__).parent
-    if str(current_dir) not in sys.path:
-        sys.path.insert(0, str(current_dir))
-    from detection import CarDetector
-    from classification import BrandClassifier
-    from anpr import ANPRModule
-    from database import Database
+
+def _import_modules():
+    """Importuje ciężkie moduły (torch, YOLO, itp.) — wywoływane leniwie z wątku tła."""
+    global CarDetector, BrandClassifier, ANPRModule, Database
+    try:
+        from .detection import CarDetector as _CD
+        from .classification import BrandClassifier as _BC
+        from .anpr import ANPRModule as _AM
+        from .database import Database as _DB
+    except ImportError:
+        current_dir = Path(__file__).parent
+        if str(current_dir) not in sys.path:
+            sys.path.insert(0, str(current_dir))
+        from detection import CarDetector as _CD
+        from classification import BrandClassifier as _BC
+        from anpr import ANPRModule as _AM
+        from database import Database as _DB
+    CarDetector = _CD
+    BrandClassifier = _BC
+    ANPRModule = _AM
+    Database = _DB
+    return _CD, _BC, _AM, _DB
+
+
+# Leniwy import — potrzebny dopiero przy ładowaniu modeli
+CarDetector = None
+BrandClassifier = None
+ANPRModule = None
+Database = None
 
 
 # ==================== STYLE SHEET ====================
@@ -248,19 +261,58 @@ def cv2_to_qpixmap(cv_img: np.ndarray, max_width: int = None, max_height: int = 
     return pixmap
 
 
+class ModelLoaderWorker(QThread):
+    """Wątek do ładowania modeli w tle — GUI nie blokuje się."""
+
+    progress = Signal(str, int)   # message, percent
+    finished = Signal(object, object, object, object)  # car_detector, brand_classifier, anpr_module, database
+    error = Signal(str)
+
+    def __init__(self, model_path, classes_path, plate_model_path):
+        super().__init__()
+        self.model_path = model_path
+        self.classes_path = classes_path
+        self.plate_model_path = plate_model_path
+
+    def run(self):
+        try:
+            self.progress.emit("Importowanie bibliotek...", 5)
+            _CD, _BC, _AM, _DB = _import_modules()
+
+            self.progress.emit("Ładowanie detektora pojazdów...", 15)
+            car_detector = _CD('yolov8s.pt')
+
+            self.progress.emit("Ładowanie klasyfikatora marki...", 45)
+            brand_classifier = _BC(self.model_path, self.classes_path)
+
+            self.progress.emit("Ładowanie modułu ANPR...", 75)
+            import torch as _torch
+            anpr_module = _AM(self.plate_model_path, gpu=_torch.cuda.is_available())
+
+            self.progress.emit("Inicjalizacja bazy danych...", 95)
+            try:
+                db = _DB()
+            except Exception as e:
+                logger.error(f"Failed to initialize database: {e}")
+                db = None
+
+            self.progress.emit("Modele załadowane", 100)
+            self.finished.emit(car_detector, brand_classifier, anpr_module, db)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class AnalysisWorker(QThread):
-    """Wątek roboczy do analizy obrazu - detekcja samochodu i marki."""
+    """Wątek roboczy do analizy obrazu - detekcja i wycięcie pojazdu."""
     
     finished = Signal(dict)
     error = Signal(str)
     progress = Signal(str, int)
     
-    def __init__(self, image: np.ndarray, car_detector: CarDetector,
-                 brand_classifier: BrandClassifier):
+    def __init__(self, image: np.ndarray, car_detector):
         super().__init__()
         self.image = image
         self.car_detector = car_detector
-        self.brand_classifier = brand_classifier
     
     def run(self):
         try:
@@ -273,22 +325,37 @@ class AnalysisWorker(QThread):
             results['car_detected'] = car_crop is not None
             
             if car_crop is None:
-                results['brand'] = "Brak"
-                results['brand_confidence'] = 0.0
                 results['car_crop'] = None
                 self.finished.emit(results)
                 return
             
             results['car_crop'] = car_crop
-            
-            self.progress.emit("Rozpoznawanie marki...", 66)
-            brand, confidence = self.brand_classifier.predict(car_crop)
-            results['brand'] = brand
-            results['brand_confidence'] = confidence
-            
-            self.progress.emit("Zakończono!", 100)
+
+            self.progress.emit("Pojazd wykryty", 100)
             self.finished.emit(results)
             
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class BrandWorker(QThread):
+    """Osobny wątek do rozpoznawania marki pojazdu."""
+
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, car_crop: np.ndarray, brand_classifier):
+        super().__init__()
+        self.car_crop = car_crop
+        self.brand_classifier = brand_classifier
+
+    def run(self):
+        try:
+            brand, confidence = self.brand_classifier.predict(self.car_crop)
+            self.finished.emit({
+                'brand': brand,
+                'brand_confidence': confidence,
+            })
         except Exception as e:
             self.error.emit(str(e))
 
@@ -300,7 +367,7 @@ class ANPRWorker(QThread):
     error = Signal(str)
     progress = Signal(str)
     
-    def __init__(self, car_crop: np.ndarray, anpr_module: ANPRModule):
+    def __init__(self, car_crop: np.ndarray, anpr_module):
         super().__init__()
         self.car_crop = car_crop
         self.anpr_module = anpr_module
@@ -389,8 +456,7 @@ class ImageCard(QFrame):
         self.image_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         img_layout = QVBoxLayout(self.image_container)
-        img_layout.setContentsMargins(4, 4, 4, 4)
-        img_layout.setAlignment(Qt.AlignCenter)
+        img_layout.setContentsMargins(2, 2, 2, 2)
         
         self.image_label = ScaledLabel()
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -497,6 +563,53 @@ class ResultCard(QFrame):
         self.subtitle_label.setText("")
 
 
+class AutoFitPlateLabel(QLabel):
+    """QLabel z automatycznym skalowaniem czcionki do dostępnej przestrzeni."""
+
+    def __init__(self, text="---"):
+        super().__init__(text)
+        self.setAlignment(Qt.AlignCenter)
+        self._base_style = (
+            "font-family: 'FE-Schrift', 'Consolas', 'Courier New', monospace;"
+            "font-weight: bold; color: #1a1a2e; letter-spacing: 4px; padding: 0 8px;"
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_font()
+
+    def setText(self, text):
+        super().setText(text)
+        self._fit_font()
+
+    def _fit_font(self):
+        text = self.text()
+        if not text:
+            return
+        w = self.width() - 16  # padding
+        h = self.height() - 4
+        if w <= 0 or h <= 0:
+            return
+        from PySide6.QtGui import QFontMetrics
+        lo, hi = 8, 60
+        best = lo
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            f = QFont("FE-Schrift", mid)
+            f.setStyleHint(QFont.Monospace)
+            f.setBold(True)
+            f.setLetterSpacing(QFont.AbsoluteSpacing, 4)
+            fm = QFontMetrics(f)
+            tw = fm.horizontalAdvance(text)
+            th = fm.height()
+            if tw <= w and th <= h:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        self.setStyleSheet(f"{self._base_style} font-size: {best}px;")
+
+
 class PlateCard(QFrame):
     """Specjalna karta dla tablicy rejestracyjnej."""
     
@@ -526,17 +639,8 @@ class PlateCard(QFrame):
         plate_layout = QHBoxLayout(self.plate_frame)
         plate_layout.setContentsMargins(8, 8, 8, 8)
         
-        
-        self.plate_text = QLabel("---")
-        self.plate_text.setStyleSheet("""
-            font-family: 'FE-Schrift', 'Consolas', 'Courier New', monospace;
-            font-size: 36px;
-            font-weight: bold;
-            color: #1a1a2e;
-            letter-spacing: 4px;
-            padding: 0 16px;
-        """)
-        self.plate_text.setAlignment(Qt.AlignCenter)
+        self.plate_text = AutoFitPlateLabel("---")
+        self.plate_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         plate_layout.addWidget(self.plate_text, 1)
         
         layout.addWidget(self.plate_frame)
@@ -652,6 +756,238 @@ class CropsWindow(QDialog):
         self.plate_crop_card.clear_image()
 
 
+class BatchWorker(QThread):
+    """Wątek do przetwarzania wsadowego wielu obrazów."""
+
+    image_started = Signal(int, str)   # index, path
+    image_done = Signal(int, dict)     # index, result dict
+    batch_error = Signal(int, str)     # index, error message
+    all_done = Signal(list)            # all results
+
+    def __init__(self, file_paths: list, car_detector, brand_classifier, anpr_module, db):
+        super().__init__()
+        self.file_paths = file_paths
+        self.car_detector = car_detector
+        self.brand_classifier = brand_classifier
+        self.anpr_module = anpr_module
+        self.db = db
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        all_results = []
+
+        for idx, path in enumerate(self.file_paths):
+            if self._cancelled:
+                break
+
+            self.image_started.emit(idx, path)
+
+            try:
+                image = cv2.imread(path)
+                if image is None:
+                    result = {'path': path, 'error': 'Nie można wczytać obrazu', 'saved': False}
+                    self.batch_error.emit(idx, result['error'])
+                    all_results.append(result)
+                    continue
+
+                car_crop, _car_data, _annotated = self.car_detector.detect_and_crop(image)
+                car_detected = car_crop is not None
+
+                brand = None
+                brand_confidence = 0.0
+                plate_text = None
+                plate_confidence = 0.0
+                plate_crop = None
+                plate_detected = False
+
+                if car_detected:
+                    brand, brand_confidence = self.brand_classifier.predict(car_crop)
+
+                    anpr_result = self.anpr_module.process(car_crop)
+                    plate_detected = anpr_result['detected']
+                    plate_text = anpr_result['text']
+                    plate_confidence = anpr_result['confidence']
+                    plate_crop = anpr_result['plate_crop']
+
+                detection_id = None
+                saved = False
+                if self.db is not None:
+                    try:
+                        detection_id = self.db.add_detection(
+                            image=image,
+                            car_detected=car_detected,
+                            car_image=car_crop,
+                            car_brand=brand,
+                            brand_confidence=brand_confidence,
+                            plate_detected=plate_detected,
+                            plate_image=plate_crop,
+                            plate_text=plate_text,
+                            plate_confidence=plate_confidence,
+                        )
+                        saved = True
+                    except Exception as db_exc:
+                        logger.warning(f"DB save failed for {path}: {db_exc}")
+
+                result = {
+                    'path': path,
+                    'car_detected': car_detected,
+                    'brand': brand,
+                    'brand_confidence': brand_confidence,
+                    'plate_detected': plate_detected,
+                    'plate_text': plate_text,
+                    'plate_confidence': plate_confidence,
+                    'detection_id': detection_id,
+                    'saved': saved,
+                }
+                self.image_done.emit(idx, result)
+                all_results.append(result)
+
+            except Exception as exc:
+                result = {'path': path, 'error': str(exc), 'saved': False}
+                self.batch_error.emit(idx, str(exc))
+                all_results.append(result)
+
+        self.all_done.emit(all_results)
+
+
+class BatchProgressDialog(QDialog):
+    """Dialog postępu przetwarzania wsadowego z tabelą wyników."""
+
+    cancelled = Signal()
+
+    def __init__(self, file_paths: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Przetwarzanie wsadowe")
+        self.setMinimumSize(780, 520)
+        self.setStyleSheet(DARK_STYLE)
+        self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.WindowMinimizeButtonHint)
+        self.total = len(file_paths)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+
+        header = QLabel("⚙️  Przetwarzanie wsadowe")
+        header.setStyleSheet("font-size: 20px; font-weight: 700; color: #f0f6fc;")
+        layout.addWidget(header)
+
+        self.status_label = QLabel("Przygotowanie...")
+        self.status_label.setStyleSheet("color: #8b949e; font-size: 13px;")
+        layout.addWidget(self.status_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, self.total)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(12)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #374151;
+                border: none;
+                border-radius: 6px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #059669, stop:1 #10b981);
+                border-radius: 6px;
+            }
+        """)
+        layout.addWidget(self.progress_bar)
+
+        self.counter_label = QLabel(f"0 / {self.total}")
+        self.counter_label.setAlignment(Qt.AlignCenter)
+        self.counter_label.setStyleSheet("color: #6b7280; font-size: 12px;")
+        layout.addWidget(self.counter_label)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["Plik", "Pojazd", "Marka", "Pewność", "Tablica", "Status"])
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in range(1, 6):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1f2937;
+                border: none;
+                border-radius: 8px;
+                gridline-color: #374151;
+            }
+            QTableWidget::item { padding: 6px; color: #d1d5db; }
+            QTableWidget::item:selected { background-color: #065f46; }
+            QHeaderView::section {
+                background-color: #111827;
+                color: #f9fafb;
+                padding: 8px;
+                border: none;
+                font-weight: 600;
+            }
+        """)
+        layout.addWidget(self.table, 1)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.cancel_btn = QPushButton("⏹  Anuluj")
+        self.cancel_btn.setProperty("class", "danger")
+        self.cancel_btn.setMinimumWidth(130)
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def _on_cancel(self):
+        self.cancelled.emit()
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText("Anulowanie...")
+
+    def add_result_row(self, result: dict):
+        """Dodaje wiersz wyników do tabeli."""
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        filename = os.path.basename(result['path'])
+        self.table.setItem(row, 0, QTableWidgetItem(filename))
+        if 'error' in result:
+            self.table.setItem(row, 1, QTableWidgetItem("❌"))
+            self.table.setItem(row, 2, QTableWidgetItem("Błąd"))
+            self.table.setItem(row, 3, QTableWidgetItem(""))
+            self.table.setItem(row, 4, QTableWidgetItem(""))
+            self.table.setItem(row, 5, QTableWidgetItem(f"❌ {result['error'][:50]}"))
+        else:
+            car_icon = "✅" if result.get('car_detected') else "❌"
+            self.table.setItem(row, 1, QTableWidgetItem(car_icon))
+            self.table.setItem(row, 2, QTableWidgetItem(result.get('brand') or '---'))
+            brand_conf = result.get('brand_confidence', 0.0)
+            conf_text = f"{brand_conf:.1f}%" if brand_conf else '---'
+            self.table.setItem(row, 3, QTableWidgetItem(conf_text))
+            self.table.setItem(row, 4, QTableWidgetItem(result.get('plate_text') or '---'))
+            status = "✅ Zapisano" if result.get('saved') else "⚠️ Nie zapisano"
+            self.table.setItem(row, 5, QTableWidgetItem(status))
+        self.table.scrollToBottom()
+
+    def update_progress(self, done: int, current_filename: str):
+        self.progress_bar.setValue(done)
+        self.counter_label.setText(f"{done} / {self.total}")
+        self.status_label.setText(f"Przetwarzanie: {current_filename}")
+
+    def finish(self, done: int):
+        self.progress_bar.setValue(done)
+        self.counter_label.setText(f"{done} / {self.total}")
+        self.status_label.setText(f"Zakończono! Przetworzono {done} z {self.total} obrazów.")
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.setText("Zamknij")
+        self.cancel_btn.setProperty("class", "secondary")
+        self.cancel_btn.style().unpolish(self.cancel_btn)
+        self.cancel_btn.style().polish(self.cancel_btn)
+        try:
+            self.cancel_btn.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self.cancel_btn.clicked.connect(self.close)
+
+
 class MainWindow(QMainWindow):
     """Główne okno aplikacji."""
     
@@ -667,14 +1003,13 @@ class MainWindow(QMainWindow):
         self.brand_classifier = None
         self.anpr_module = None
         self.worker = None
+        self.brand_worker = None
         self.anpr_worker = None
+        self._brand_done = False
+        self._anpr_done = False
         
-        # Inicjalizacja bazy danych
-        try:
-            self.db = Database()
-        except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
-            self.db = None
+        # Baza danych — inicjalizowana w wątku ładowania modeli
+        self.db = None
         
         self.last_car_crop = None
         self.last_brand = None
@@ -682,10 +1017,17 @@ class MainWindow(QMainWindow):
         self._last_annotated = None
         self._last_car_crop_img = None
         self._last_plate_crop = None
+        self.batch_worker = None
+        self.batch_progress_dialog = None
+        self._batch_done_count = 0
         self._last_car_crop_with_plate = None
+        self._last_gradcam_overlay = None
+        self._last_detection_id = None
         
+        self.setAcceptDrops(True)
+        self._model_loader = None
         self.init_ui()
-        self.load_models()
+        self._start_async_model_loading()
     
     def init_ui(self):
         """Inicjalizacja interfejsu użytkownika."""
@@ -742,7 +1084,7 @@ class MainWindow(QMainWindow):
         self.input_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.input_card.set_clickable(True)
         self.input_card.clicked.connect(self.load_image)
-        content.addWidget(self.input_card, 3)
+        content.addWidget(self.input_card, 5)
 
         # RIGHT: Results
         right_panel = QVBoxLayout()
@@ -750,15 +1092,17 @@ class MainWindow(QMainWindow):
 
         self.brand_card = ResultCard("🏎️", "MARKA POJAZDU", "#58a6ff")
         self.brand_card.setMinimumHeight(140)
+        self.brand_card.setMinimumWidth(260)
         self.brand_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_panel.addWidget(self.brand_card, 1)
 
         self.plate_card = PlateCard()
         self.plate_card.setMinimumHeight(160)
+        self.plate_card.setMinimumWidth(260)
         self.plate_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_panel.addWidget(self.plate_card, 1)
 
-        content.addLayout(right_panel, 1)
+        content.addLayout(right_panel, 2)
         main_layout.addLayout(content, 1)
 
         # ===== STATUS BAR =====
@@ -766,31 +1110,33 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.status_bar)
 
         # ===== SIDEBAR OVERLAY (nad contentem, pozycjonowany absolutnie) =====
+        self._sidebar_margin_left = 12
+        self._sidebar_margin_top = 8
         self.sidebar = QFrame(central)
-        self.sidebar.setFixedWidth(220)
+        self.sidebar.setFixedWidth(230)
         self.sidebar.setVisible(False)
         self.sidebar.setStyleSheet("""
             QFrame {
                 background-color: #1a2333;
-                border-top-right-radius: 20px;
-                border-bottom-right-radius: 20px;
+                border-radius: 16px;
+                border: 1px solid #2d3a4d;
             }
         """)
 
         sidebar_shadow = QGraphicsDropShadowEffect()
-        sidebar_shadow.setBlurRadius(32)
-        sidebar_shadow.setXOffset(8)
-        sidebar_shadow.setYOffset(0)
-        sidebar_shadow.setColor(QColor(0, 0, 0, 120))
+        sidebar_shadow.setBlurRadius(40)
+        sidebar_shadow.setXOffset(0)
+        sidebar_shadow.setYOffset(8)
+        sidebar_shadow.setColor(QColor(0, 0, 0, 160))
         self.sidebar.setGraphicsEffect(sidebar_shadow)
         self.sidebar.raise_()
 
         sidebar_layout = QVBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(16, 24, 16, 24)
-        sidebar_layout.setSpacing(10)
+        sidebar_layout.setContentsMargins(18, 20, 18, 20)
+        sidebar_layout.setSpacing(8)
 
-        sidebar_title = QLabel("Menu")
-        sidebar_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #6b7280; letter-spacing: 1px;")
+        sidebar_title = QLabel("MENU")
+        sidebar_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #6b7280; letter-spacing: 2px; padding-bottom: 4px;")
         sidebar_layout.addWidget(sidebar_title)
 
         self.heatmap_btn = QPushButton("🔥  Mapa ciepła")
@@ -830,75 +1176,105 @@ class MainWindow(QMainWindow):
         self.history_btn.clicked.connect(self.show_history)
         sidebar_layout.addWidget(self.history_btn)
 
+        sidebar_layout.addSpacing(16)
+        sep2 = QFrame()
+        sep2.setFixedHeight(1)
+        sep2.setStyleSheet("background-color: #374151;")
+        sidebar_layout.addWidget(sep2)
+        sidebar_layout.addSpacing(8)
+
+        self.batch_btn = QPushButton("📂  Przetwarzanie wsadowe")
+        self.batch_btn.setProperty("class", "accent")
+        self.batch_btn.setMinimumHeight(44)
+        self.batch_btn.setCursor(Qt.PointingHandCursor)
+        self.batch_btn.clicked.connect(self.open_batch_dialog)
+        sidebar_layout.addWidget(self.batch_btn)
+
         sidebar_layout.addStretch()
 
-    def _sidebar_y(self):
-        """Y od którego zaczyna się sidebar (poniżej top bar)."""
-        return self.top_bar_widget.geometry().bottom() + 1
+    def _sidebar_x(self):
+        """X sidebara z marginesem od lewej krawędzi."""
+        return self._sidebar_margin_left
+
+    def _sidebar_y_open(self):
+        """Y docelowe (otwarte) = poniżej top bar + margines."""
+        return self.top_bar_widget.geometry().bottom() + 1 + self._sidebar_margin_top
 
     def _sidebar_target_height(self):
-        """Wysokość sidebara = do końca ostatniego przycisku + margines."""
+        """Wysokość sidebara = do końca ostatniego przycisku."""
         self.sidebar.adjustSize()
-        return self.sidebar.sizeHint().height() + 16
+        return self.sidebar.sizeHint().height()
 
     def resizeEvent(self, event):
         """Aktualizuje pozycję sidebara przy zmianie rozmiaru okna."""
         super().resizeEvent(event)
         if hasattr(self, 'sidebar') and hasattr(self, 'top_bar_widget'):
-            y = self._sidebar_y()
-            self.sidebar.move(0, y)
+            x = self._sidebar_x()
+            y_open = self._sidebar_y_open()
+            h = self._sidebar_target_height()
+            self.sidebar.setFixedHeight(h)
             if self.sidebar.isVisible():
-                self.sidebar.setFixedHeight(self._sidebar_target_height())
+                self.sidebar.move(x, y_open)
+            else:
+                self.sidebar.move(x, y_open - h - 20)
 
     def toggle_sidebar(self):
-        """Wysuwa / chowa panel boczny animacją z góry w dół."""
-        y = self._sidebar_y()
-        self.sidebar.move(0, y)
+        """Wysuwa / chowa panel boczny animacją slide z góry na dół."""
+        x = self._sidebar_x()
+        y_open = self._sidebar_y_open()
+        h = self._sidebar_target_height()
+        self.sidebar.setFixedHeight(h)
         self.sidebar.raise_()
 
+        from PySide6.QtCore import QPoint
+
         if not self.sidebar.isVisible():
-            target_h = self._sidebar_target_height()
-            self.sidebar.setFixedHeight(0)
+            self.sidebar.move(x, y_open - h - 20)
             self.sidebar.setVisible(True)
-            anim = QPropertyAnimation(self.sidebar, b"maximumHeight", self)
-            anim.setStartValue(0)
-            anim.setEndValue(target_h)
+            anim = QPropertyAnimation(self.sidebar, b"pos", self)
+            anim.setStartValue(QPoint(x, y_open - h - 20))
+            anim.setEndValue(QPoint(x, y_open))
             anim.setDuration(220)
             anim.setEasingCurve(QEasingCurve.OutCubic)
-            anim.finished.connect(lambda: self.sidebar.setFixedHeight(target_h))
             self._sidebar_anim = anim
             anim.start()
         else:
-            target_h = self.sidebar.height()
-            anim = QPropertyAnimation(self.sidebar, b"maximumHeight", self)
-            anim.setStartValue(target_h)
-            anim.setEndValue(0)
+            anim = QPropertyAnimation(self.sidebar, b"pos", self)
+            anim.setStartValue(QPoint(x, y_open))
+            anim.setEndValue(QPoint(x, y_open - h - 20))
             anim.setDuration(180)
             anim.setEasingCurve(QEasingCurve.InCubic)
             anim.finished.connect(lambda: self.sidebar.setVisible(False))
             self._sidebar_anim = anim
             anim.start()
     
-    def load_models(self):
-        """Ładuje modele do pamięci."""
-        self.status_bar.set_status("Ładowanie modeli...", "⏳")
-        QApplication.processEvents()
-        
-        try:
-            self.car_detector = CarDetector('yolov8s.pt')
-            self.status_bar.set_status("Ładowanie klasyfikatora...", "⏳", 33)
-            QApplication.processEvents()
-            
-            self.brand_classifier = BrandClassifier(self.model_path, self.classes_path)
-            self.status_bar.set_status("Ładowanie modułu ANPR...", "⏳", 66)
-            QApplication.processEvents()
-            
-            self.anpr_module = ANPRModule(self.plate_model_path)
-            self.status_bar.set_status("Wszystkie modele załadowane", "✅")
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Błąd", f"Nie udało się załadować modeli:\n{str(e)}")
-            self.status_bar.set_status(f"Błąd: {str(e)}", "❌")
+    def _start_async_model_loading(self):
+        """Uruchamia ładowanie modeli w wątku tła — GUI pozostaje responsywne."""
+        self.input_card.setEnabled(False)
+        self.status_bar.set_status("Ładowanie modeli...", "⏳", 0)
+
+        self._model_loader = ModelLoaderWorker(
+            self.model_path, self.classes_path, self.plate_model_path
+        )
+        self._model_loader.progress.connect(self._on_model_load_progress)
+        self._model_loader.finished.connect(self._on_models_loaded)
+        self._model_loader.error.connect(self._on_model_load_error)
+        self._model_loader.start()
+
+    def _on_model_load_progress(self, message: str, percent: int):
+        self.status_bar.set_status(message, "⏳", percent)
+
+    def _on_models_loaded(self, car_detector, brand_classifier, anpr_module, db):
+        self.car_detector = car_detector
+        self.brand_classifier = brand_classifier
+        self.anpr_module = anpr_module
+        self.db = db
+        self.input_card.setEnabled(True)
+        self.status_bar.set_status("Wszystkie modele załadowane", "✅")
+
+    def _on_model_load_error(self, error: str):
+        QMessageBox.critical(self, "Błąd", f"Nie udało się załadować modeli:\n{error}")
+        self.status_bar.set_status(f"Błąd: {error}", "❌")
     
     def load_image(self):
         """Wczytuje obraz z dysku."""
@@ -951,12 +1327,17 @@ class MainWindow(QMainWindow):
         self.brand_card.reset()
         self.plate_card.reset()
         self.heatmap_btn.setEnabled(False)
+        self.save_db_btn.setEnabled(False)
         self.last_car_crop = None
         self.last_brand = None
         self._last_annotated = None
         self._last_car_crop_img = None
         self._last_plate_crop = None
         self._last_car_crop_with_plate = None
+        self._last_gradcam_overlay = None
+        self._last_detection_id = None
+        self._brand_done = False
+        self._anpr_done = False
     
     def analyze_image(self):
         """Uruchamia analizę."""
@@ -968,16 +1349,20 @@ class MainWindow(QMainWindow):
             return
         
         self.input_card.setEnabled(False)
-        
-        # Resetuj tablicę
+        self.brand_card.reset()
         self.plate_card.reset()
+        self.heatmap_btn.setEnabled(False)
+        self.save_db_btn.setEnabled(False)
+        self.last_brand = None
+        self._brand_done = False
+        self._anpr_done = False
+        
         if self.crops_window is not None:
             self.crops_window.plate_crop_card.clear_image()
         
         self.worker = AnalysisWorker(
             self.current_image,
-            self.car_detector,
-            self.brand_classifier
+            self.car_detector
         )
         self.worker.finished.connect(self.on_analysis_finished)
         self.worker.error.connect(self.on_analysis_error)
@@ -988,14 +1373,8 @@ class MainWindow(QMainWindow):
         self.status_bar.set_status(message, "⏳", percent)
     
     def on_analysis_finished(self, results: dict):
-        """Obsługuje zakończenie analizy detekcji i marki."""
-        self.input_card.setEnabled(True)
-        
+        """Obsługuje zakończenie detekcji pojazdu i uruchamia analizę równoległą."""
         self.last_car_crop = results.get('car_crop')
-        self.last_brand = results.get('brand')
-        
-        if self.last_car_crop is not None:
-            self.heatmap_btn.setEnabled(True)
         
         # Zapisz i wyświetl detekcję i crop
         if results.get('annotated_image') is not None:
@@ -1008,12 +1387,44 @@ class MainWindow(QMainWindow):
             if self.crops_window is not None:
                 pixmap = cv2_to_qpixmap(self._last_car_crop_img, max_width=320, max_height=240)
                 self.crops_window.crop_card.set_image(pixmap)
-        
-        # Wyświetl markę
+
+        if self.last_car_crop is None:
+            self.brand_card.set_value("Brak", "Pewność: 0.0%")
+            self.input_card.setEnabled(True)
+            self.status_bar.set_status("Nie wykryto pojazdu", "⚠️")
+            if self.db is not None:
+                self.save_db_btn.setEnabled(True)
+            return
+
+        self.brand_card.set_value("...", "Trwa rozpoznawanie marki")
+        self.plate_card.set_plate("...", 0.0)
+        self.status_bar.set_status("Rozpoznawanie marki i tablicy...", "⏳", 66)
+
+        self.start_brand_classification()
+        self.start_anpr()
+
+    def start_brand_classification(self):
+        """Uruchamia osobny wątek do rozpoznawania marki pojazdu."""
+        self.brand_worker = BrandWorker(self.last_car_crop, self.brand_classifier)
+        self.brand_worker.finished.connect(self.on_brand_finished)
+        self.brand_worker.error.connect(self.on_brand_error)
+        self.brand_worker.start()
+    
+    def start_anpr(self):
+        """Uruchamia osobny wątek do odczytu tablicy."""
+        self.anpr_worker = ANPRWorker(self.last_car_crop, self.anpr_module)
+        self.anpr_worker.finished.connect(self.on_anpr_finished)
+        self.anpr_worker.error.connect(self.on_anpr_error)
+        self.anpr_worker.start()
+
+    def on_brand_finished(self, results: dict):
+        """Obsługuje zakończenie rozpoznawania marki."""
         brand = results.get('brand', '---')
         confidence = results.get('brand_confidence', 0.0)
+        self.last_brand = brand
+        self.heatmap_btn.setEnabled(True)
         self.brand_card.set_value(brand, f"Pewność: {confidence:.1f}%")
-        
+
         if confidence >= 80:
             color = "#3fb950"
         elif confidence >= 50:
@@ -1021,26 +1432,12 @@ class MainWindow(QMainWindow):
         else:
             color = "#f85149"
         self.brand_card.value_label.setStyleSheet(f"color: {color}; font-size: 32px; font-weight: 700;")
-        
-        # Włącz przycisk zapisu do bazy jeśli istnieje baza danych
-        if self.db is not None:
-            self.save_db_btn.setEnabled(True)
-        
-        self.status_bar.set_status("Detekcja zakończona", "✅")
-        
-        # Uruchom osobno odczyt tablicy (nie blokuje UI)
-        if self.last_car_crop is not None:
-            self.start_anpr()
-    
-    def start_anpr(self):
-        """Uruchamia osobny wątek do odczytu tablicy."""
-        self.plate_card.set_plate("...", 0.0)
-        self.status_bar.set_status("Odczyt tablicy...", "🔢")
-        
-        self.anpr_worker = ANPRWorker(self.last_car_crop, self.anpr_module)
-        self.anpr_worker.finished.connect(self.on_anpr_finished)
-        self.anpr_worker.error.connect(self.on_anpr_error)
-        self.anpr_worker.start()
+
+        self._brand_done = True
+        if self._anpr_done:
+            self._finish_parallel_analysis()
+        else:
+            self.status_bar.set_status("Marka gotowa, trwa odczyt tablicy...", "🏎️")
     
     def on_anpr_finished(self, results: dict):
         """Obsługuje zakończenie odczytu tablicy."""
@@ -1058,12 +1455,101 @@ class MainWindow(QMainWindow):
             if self.crops_window is not None:
                 pixmap = cv2_to_qpixmap(self._last_car_crop_with_plate, max_width=320, max_height=240)
                 self.crops_window.crop_card.set_image(pixmap)
-        
-        self.status_bar.set_status("Analiza zakończona", "✅")
+
+        self._anpr_done = True
+        if self._brand_done:
+            self._finish_parallel_analysis()
+        else:
+            self.status_bar.set_status("Tablica gotowa, trwa rozpoznawanie marki...", "🔢")
     
     def on_anpr_error(self, error: str):
         self.plate_card.set_plate("Błąd", 0.0)
+        self._anpr_done = True
+        if self._brand_done:
+            self.input_card.setEnabled(True)
+            if self.db is not None:
+                self.save_db_btn.setEnabled(True)
         self.status_bar.set_status(f"Błąd tablicy: {error}", "⚠️")
+
+    def on_brand_error(self, error: str):
+        self.brand_card.set_value("Błąd", "Nie udało się rozpoznać marki")
+        self.heatmap_btn.setEnabled(False)
+        self._brand_done = True
+        if self._anpr_done:
+            self.input_card.setEnabled(True)
+            if self.db is not None:
+                self.save_db_btn.setEnabled(True)
+        self.status_bar.set_status(f"Błąd marki: {error}", "⚠️")
+
+    def _finish_parallel_analysis(self):
+        """Kończy analizę po zamknięciu obu równoległych zadań i automatycznie zapisuje do bazy."""
+        self.input_card.setEnabled(True)
+        if self.db is not None:
+            self.save_db_btn.setEnabled(True)
+        self.status_bar.set_status("Analiza zakończona — zapisywanie...", "⏳")
+
+        # Automatyczne generowanie Grad-CAM i zapis do bazy
+        self._auto_save_to_database()
+    
+    def _auto_save_to_database(self):
+        """Automatycznie zapisuje wynik analizy do bazy danych (z Grad-CAM)."""
+        if self.db is None or self.current_image is None:
+            self.status_bar.set_status("Analiza zakończona", "✅")
+            return
+        
+        try:
+            # Pobierz rozpoznane wyniki
+            brand_text = self.brand_card.value_label.text()
+            car_detected = brand_text not in ("---", "Brak", "Błąd", "...")
+            
+            plate_text = self.plate_card.plate_text.text()
+            plate_detected = plate_text and plate_text not in ("---", "Nie wykryto tablicy", "Błąd", "...")
+            
+            # Pobierz confidence values
+            brand_confidence = 0.0
+            plate_confidence = 0.0
+            try:
+                sub = self.brand_card.subtitle_label.text()
+                if sub and ":" in sub:
+                    brand_confidence = float(sub.split(": ")[1].rstrip("%")) / 100
+            except Exception:
+                pass
+            try:
+                sub = self.plate_card.confidence_label.text()
+                if sub and ":" in sub:
+                    plate_confidence = float(sub.split(": ")[1].rstrip("%")) / 100
+            except Exception:
+                pass
+            
+            # Generuj Grad-CAM jeśli mamy crop i klasyfikator
+            gradcam_overlay = None
+            if self.last_car_crop is not None and self.brand_classifier is not None:
+                try:
+                    overlay, _heatmap, _cam = self.brand_classifier.generate_gradcam(self.last_car_crop)
+                    gradcam_overlay = overlay
+                    self._last_gradcam_overlay = overlay
+                except Exception as e:
+                    logger.warning(f"Grad-CAM generation failed (auto-save): {e}")
+            
+            detection_id = self.db.add_detection(
+                image=self.current_image,
+                car_detected=car_detected,
+                car_image=self.last_car_crop,
+                car_brand=brand_text if car_detected else None,
+                brand_confidence=brand_confidence,
+                plate_detected=plate_detected,
+                plate_image=self._last_plate_crop,
+                plate_text=plate_text if plate_detected else None,
+                plate_confidence=plate_confidence,
+                gradcam_image=gradcam_overlay,
+            )
+            self._last_detection_id = detection_id
+            self.save_db_btn.setEnabled(False)
+            self.status_bar.set_status(f"Zapisano automatycznie (ID: {detection_id})", "✅")
+            
+        except Exception as e:
+            logger.warning(f"Auto-save failed: {e}")
+            self.status_bar.set_status("Analiza zakończona (auto-zapis nie powiódł się)", "⚠️")
     
     def on_analysis_error(self, error: str):
         self.input_card.setEnabled(True)
@@ -1088,55 +1574,65 @@ class MainWindow(QMainWindow):
             self.status_bar.set_status(f"Błąd: {str(e)}", "❌")
     
     def save_to_database(self):
-        """Zapisuje wynik analizy do bazy danych."""
+        """Zapisuje wynik analizy do bazy danych (ręczne wywołanie)."""
         if self.db is None:
             QMessageBox.warning(self, "Baza niedostępna", "Baza danych nie jest dostępna")
             return
         
         if self.current_image is None:
-            QMessageBox.warning(self, "Brak obrazu", "Wczytaj obraz por przed zapisem")
+            QMessageBox.warning(self, "Brak obrazu", "Wczytaj obraz przed zapisem")
             return
         
         try:
             self.status_bar.set_status("Zapisywanie do bazy danych...", "⏳")
             QApplication.processEvents()
             
-            # Pobierz rozpoznane wyniki
             brand_text = self.brand_card.value_label.text()
-            car_detected = brand_text != "---"
+            car_detected = brand_text not in ("---", "Brak", "Błąd", "...")
             
             plate_text = self.plate_card.plate_text.text()
-            plate_detected = plate_text and plate_text != "---" and plate_text != "Nie wykryto tablicy"
+            plate_detected = plate_text and plate_text not in ("---", "Nie wykryto tablicy", "Błąd", "...")
             
-            # Pobierz confidence values
             brand_confidence = 0.0
             plate_confidence = 0.0
             try:
-                if self.brand_card.subtitle_label.text():
-                    brand_confidence = float(self.brand_card.subtitle_label.text().split(": ")[1].rstrip("%")) / 100
-                if self.plate_card.confidence_label.text():
-                    plate_confidence = float(self.plate_card.confidence_label.text().split(": ")[1].rstrip("%")) / 100
-            except:
+                sub = self.brand_card.subtitle_label.text()
+                if sub and ":" in sub:
+                    brand_confidence = float(sub.split(": ")[1].rstrip("%")) / 100
+            except Exception:
+                pass
+            try:
+                sub = self.plate_card.confidence_label.text()
+                if sub and ":" in sub:
+                    plate_confidence = float(sub.split(": ")[1].rstrip("%")) / 100
+            except Exception:
                 pass
             
-            # Zapisz do bazy
+            # Grad-CAM
+            gradcam_overlay = self._last_gradcam_overlay
+            if gradcam_overlay is None and self.last_car_crop is not None and self.brand_classifier is not None:
+                try:
+                    overlay, _, _ = self.brand_classifier.generate_gradcam(self.last_car_crop)
+                    gradcam_overlay = overlay
+                except Exception:
+                    pass
+            
             detection_id = self.db.add_detection(
                 image=self.current_image,
                 car_detected=car_detected,
-                car_image=self.last_car_crop if self.last_car_crop is not None else None,
+                car_image=self.last_car_crop,
                 car_brand=brand_text if car_detected else None,
                 brand_confidence=brand_confidence,
                 plate_detected=plate_detected,
-                plate_image=None,  # TODO: przesłać plate_crop jeśli dostępny
+                plate_image=self._last_plate_crop,
                 plate_text=plate_text if plate_detected else None,
                 plate_confidence=plate_confidence,
-                notes=None
+                gradcam_image=gradcam_overlay,
             )
             
+            self._last_detection_id = detection_id
             self.status_bar.set_status(f"✅ Zapisano do bazy (ID: {detection_id})", "✅")
-            QMessageBox.information(self, "Sukces", f"Wynik został zapisany do bazy danych.\nID: {detection_id}\n\nLokalizacja: {self.db.db_dir}")
-            
-            # Wyłącz przycisk po zapisie
+            QMessageBox.information(self, "Sukces", f"Wynik zapisany do bazy danych.\nID: {detection_id}")
             self.save_db_btn.setEnabled(False)
             
         except Exception as e:
@@ -1163,16 +1659,148 @@ class MainWindow(QMainWindow):
         dialog = HistoryDialog(self, self.db)
         dialog.exec()
 
+    # ==================== BATCH PROCESSING ====================
+
+    def open_batch_dialog(self):
+        """Otwiera okno wyboru wielu plików do przetwarzania wsadowego."""
+        if not all([self.car_detector, self.brand_classifier, self.anpr_module]):
+            QMessageBox.warning(self, "Błąd", "Modele nie są jeszcze załadowane.")
+            return
+
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Wybierz obrazy do przetwarzania wsadowego",
+            "",
+            "Obrazy (*.png *.jpg *.jpeg *.bmp *.webp);;Wszystkie (*.*)"
+        )
+
+        if file_paths:
+            self.start_batch_processing(file_paths)
+
+    def start_batch_processing(self, file_paths: list):
+        """Uruchamia przetwarzanie wsadowe dla listy plików."""
+        if not file_paths:
+            return
+
+        if not all([self.car_detector, self.brand_classifier, self.anpr_module]):
+            QMessageBox.warning(self, "Błąd", "Modele nie są jeszcze załadowane.")
+            return
+
+        # Zamknij poprzedni dialog jeśli otwarty
+        if self.batch_progress_dialog is not None:
+            self.batch_progress_dialog.close()
+
+        self._batch_done_count = 0
+
+        self.batch_progress_dialog = BatchProgressDialog(file_paths, self)
+        self.batch_progress_dialog.cancelled.connect(self._on_batch_cancel)
+
+        self.batch_worker = BatchWorker(
+            file_paths,
+            self.car_detector,
+            self.brand_classifier,
+            self.anpr_module,
+            self.db,
+        )
+        self.batch_worker.image_started.connect(self._on_batch_image_started)
+        self.batch_worker.image_done.connect(self._on_batch_image_done)
+        self.batch_worker.batch_error.connect(self._on_batch_error)
+        self.batch_worker.all_done.connect(self._on_batch_all_done)
+
+        self.batch_worker.start()
+        self.batch_progress_dialog.exec()
+
+    def _on_batch_image_started(self, idx: int, path: str):
+        if self.batch_progress_dialog is not None:
+            self.batch_progress_dialog.update_progress(idx, os.path.basename(path))
+
+    def _on_batch_image_done(self, idx: int, result: dict):
+        self._batch_done_count += 1
+        if self.batch_progress_dialog is not None:
+            self.batch_progress_dialog.add_result_row(result)
+
+    def _on_batch_error(self, idx: int, error: str):
+        self._batch_done_count += 1
+        # Error row is added by the worker via batch_error, but result dict with 'error'
+        # key has already been emitted; we add the row here if needed.
+        # (The worker adds to all_results; we just let image_done handle normal rows
+        #  and batch_error means a failed row was appended — add it to dialog.)
+        if self.batch_progress_dialog is not None:
+            # We don't have the path here; it's handled in all_done summary.
+            pass
+
+    def _on_batch_all_done(self, results: list):
+        done = sum(1 for r in results if 'error' not in r or not r.get('error'))
+        # Add error rows that weren't added via image_done
+        if self.batch_progress_dialog is not None:
+            for r in results:
+                if 'error' in r:
+                    self.batch_progress_dialog.add_result_row(r)
+            self.batch_progress_dialog.finish(len(results))
+
+        saved_count = sum(1 for r in results if r.get('saved'))
+        self.status_bar.set_status(
+            f"Wsad zakończony: {len(results)} obrazów, {saved_count} zapisano do bazy", "✅"
+        )
+
+    def _on_batch_cancel(self):
+        if self.batch_worker is not None:
+            self.batch_worker.cancel()
+
+    # ==================== DRAG & DROP ====================
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            image_exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+            has_image = any(
+                Path(u.toLocalFile()).suffix.lower() in image_exts
+                for u in urls
+            )
+            if has_image:
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        image_exts = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+        paths = [
+            u.toLocalFile() for u in urls
+            if Path(u.toLocalFile()).suffix.lower() in image_exts
+        ]
+
+        if not paths:
+            return
+
+        if len(paths) == 1:
+            # Single image — load as current image
+            self.current_image = cv2.imread(paths[0])
+            if self.current_image is None:
+                QMessageBox.warning(self, "Błąd", "Nie udało się wczytać obrazu.")
+                return
+            pixmap = cv2_to_qpixmap(self.current_image)
+            self.input_card.set_image(pixmap)
+            self.clear_results()
+            self.status_bar.set_status(f"Wczytano: {os.path.basename(paths[0])}", "📷")
+            self.analyze_image()
+        else:
+            # Multiple images — start batch
+            self.start_batch_processing(paths)
+
+
+
 
 class HistoryDialog(QDialog):
-    """Okno dialogowe do przeglądania historii analiz z bazą danych."""
+    """Okno dialogowe do przeglądania historii analiz z miniaturami i podglądem."""
     
     def __init__(self, parent, database):
         super().__init__(parent)
         
         self.db = database
-        self.setWindowTitle("Historia analiz")
-        self.setMinimumSize(1200, 700)
+        self._detections_cache = []
+        self.setWindowTitle("Historia analiz — CarVision AI")
+        self.setMinimumSize(1300, 780)
         self.setStyleSheet(DARK_STYLE)
         
         layout = QVBoxLayout(self)
@@ -1180,82 +1808,109 @@ class HistoryDialog(QDialog):
         layout.setSpacing(16)
         
         # ===== HEADER =====
-        header = QVBoxLayout()
+        header_layout = QHBoxLayout()
         title = QLabel("📋 Historia analiz")
         title.setStyleSheet("font-size: 24px; font-weight: 700; color: #f0f6fc;")
-        header.addWidget(title)
-        layout.addLayout(header)
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        
+        self.stats_label = QLabel("")
+        self.stats_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        header_layout.addWidget(self.stats_label)
+        layout.addLayout(header_layout)
         
         # ===== FILTERS =====
         filter_layout = QHBoxLayout()
         filter_layout.setSpacing(12)
         
-        filter_label = QLabel("Filtruj:")
+        filter_label = QLabel("🔍 Filtruj:")
         filter_label.setStyleSheet("color: #8b949e; font-weight: 600;")
         filter_layout.addWidget(filter_label)
         
         self.brand_filter = QLineEdit()
-        self.brand_filter.setPlaceholderText("Filtruj po marce...")
-        self.brand_filter.setMaximumWidth(200)
+        self.brand_filter.setPlaceholderText("Marka...")
+        self.brand_filter.setMaximumWidth(160)
         self.brand_filter.setStyleSheet("""
             QLineEdit {
                 background-color: #374151;
                 border: none;
                 border-radius: 8px;
-                padding: 8px;
+                padding: 8px 12px;
                 color: #e2e8f0;
+                font-size: 13px;
             }
+            QLineEdit:focus { background-color: #4b5563; }
         """)
         self.brand_filter.textChanged.connect(self.refresh_table)
         filter_layout.addWidget(self.brand_filter)
         
         self.plate_filter = QLineEdit()
-        self.plate_filter.setPlaceholderText("Filtruj po tablicy...")
-        self.plate_filter.setMaximumWidth(200)
+        self.plate_filter.setPlaceholderText("Tablica...")
+        self.plate_filter.setMaximumWidth(160)
         self.plate_filter.setStyleSheet("""
             QLineEdit {
                 background-color: #374151;
                 border: none;
                 border-radius: 8px;
-                padding: 8px;
+                padding: 8px 12px;
                 color: #e2e8f0;
+                font-size: 13px;
             }
+            QLineEdit:focus { background-color: #4b5563; }
         """)
         self.plate_filter.textChanged.connect(self.refresh_table)
         filter_layout.addWidget(self.plate_filter)
         
-        filter_layout.addStretch()
+        self.incorrect_filter = QComboBox()
+        self.incorrect_filter.addItems(["Wszystkie", "Tylko poprawne", "Tylko błędne"])
+        self.incorrect_filter.setMaximumWidth(160)
+        self.incorrect_filter.setStyleSheet("""
+            QComboBox {
+                background-color: #374151;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 12px;
+                color: #e2e8f0;
+                font-size: 13px;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox::down-arrow { image: none; }
+            QComboBox QAbstractItemView {
+                background-color: #1f2937;
+                color: #e2e8f0;
+                selection-background-color: #065f46;
+            }
+        """)
+        self.incorrect_filter.currentIndexChanged.connect(self.refresh_table)
+        filter_layout.addWidget(self.incorrect_filter)
         
+        filter_layout.addStretch()
         layout.addLayout(filter_layout)
         
-        # ===== STATISTICS =====
-        stats_layout = QHBoxLayout()
-        stats_layout.setSpacing(16)
+        # ===== MAIN CONTENT: TABLE + PREVIEW =====
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(16)
         
-        self.stats_label = QLabel("")
-        self.stats_label.setStyleSheet("color: #8b949e; font-size: 12px;")
-        stats_layout.addWidget(self.stats_label)
-        stats_layout.addStretch()
-        
-        layout.addLayout(stats_layout)
-        
-        # ===== TABLE =====
+        # --- TABLE ---
         self.table = QTableWidget()
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
-            "ID", "Data/Czas", "Marka", "Pewność %", "Tablica", "Tablica Pewność %", "Auto", "Tablica"
+            "ID", "Data/Czas", "Marka", "Pewność", "Tablica", "Pewn. tabl.", "Status", "Błędny?"
         ])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.currentCellChanged.connect(self._on_row_selected)
         
-        # Stylowanie tabeli
         self.table.setStyleSheet("""
             QTableWidget {
                 background-color: #1f2937;
                 border: none;
                 border-radius: 8px;
                 gridline-color: #374151;
+                font-size: 12px;
             }
             QTableWidget::item {
-                padding: 8px;
+                padding: 6px 8px;
                 color: #d1d5db;
             }
             QTableWidget::item:selected {
@@ -1267,10 +1922,12 @@ class HistoryDialog(QDialog):
                 padding: 8px;
                 border: none;
                 font-weight: 600;
+                font-size: 11px;
             }
         """)
         
         header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
@@ -1279,7 +1936,98 @@ class HistoryDialog(QDialog):
         header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
         
-        layout.addWidget(self.table)
+        content_layout.addWidget(self.table, 3)
+        
+        # --- PREVIEW PANEL ---
+        self.preview_panel = QFrame()
+        self.preview_panel.setFixedWidth(340)
+        self.preview_panel.setStyleSheet("""
+            QFrame {
+                background-color: #1f2937;
+                border: none;
+                border-radius: 16px;
+            }
+        """)
+        
+        preview_outer = QVBoxLayout(self.preview_panel)
+        preview_outer.setContentsMargins(0, 0, 0, 0)
+        preview_outer.setSpacing(0)
+        
+        # Scroll area wewnątrz panelu
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QWidget#previewInner { background: transparent; }
+        """)
+        
+        inner = QWidget()
+        inner.setObjectName("previewInner")
+        preview_layout = QVBoxLayout(inner)
+        preview_layout.setContentsMargins(14, 14, 14, 14)
+        preview_layout.setSpacing(6)
+        
+        preview_title = QLabel("🔎 PODGLĄD")
+        preview_title.setProperty("class", "section-title")
+        preview_layout.addWidget(preview_title)
+        
+        IMG_W, IMG_H, PLATE_H = 308, 130, 60
+        label_ss = "color: #9ca3af; font-size: 10px; font-weight: 700; letter-spacing: 1px;"
+        img_ss = "background-color: #111827; border-radius: 8px;"
+        
+        # Miniatura pojazdu
+        self.preview_car_label = QLabel("POJAZD")
+        self.preview_car_label.setStyleSheet(label_ss)
+        preview_layout.addWidget(self.preview_car_label)
+        
+        self.preview_car_img = QLabel()
+        self.preview_car_img.setFixedSize(IMG_W, IMG_H)
+        self.preview_car_img.setAlignment(Qt.AlignCenter)
+        self.preview_car_img.setScaledContents(True)
+        self.preview_car_img.setStyleSheet(img_ss)
+        preview_layout.addWidget(self.preview_car_img)
+        
+        # Miniatura Grad-CAM
+        self.preview_gradcam_label = QLabel("GRAD-CAM")
+        self.preview_gradcam_label.setStyleSheet(label_ss)
+        preview_layout.addWidget(self.preview_gradcam_label)
+        
+        self.preview_gradcam_img = QLabel()
+        self.preview_gradcam_img.setFixedSize(IMG_W, IMG_H)
+        self.preview_gradcam_img.setAlignment(Qt.AlignCenter)
+        self.preview_gradcam_img.setScaledContents(True)
+        self.preview_gradcam_img.setStyleSheet(img_ss)
+        preview_layout.addWidget(self.preview_gradcam_img)
+        
+        # Miniatura tablicy
+        self.preview_plate_label = QLabel("TABLICA")
+        self.preview_plate_label.setStyleSheet(label_ss)
+        preview_layout.addWidget(self.preview_plate_label)
+        
+        self.preview_plate_img = QLabel()
+        self.preview_plate_img.setFixedSize(IMG_W, PLATE_H)
+        self.preview_plate_img.setAlignment(Qt.AlignCenter)
+        self.preview_plate_img.setScaledContents(True)
+        self.preview_plate_img.setStyleSheet(img_ss)
+        preview_layout.addWidget(self.preview_plate_img)
+        
+        preview_layout.addStretch()
+        
+        # Przycisk oznaczenia błędnego
+        self.toggle_incorrect_btn = QPushButton("⚠️ Oznacz jako błędny")
+        self.toggle_incorrect_btn.setProperty("class", "danger")
+        self.toggle_incorrect_btn.setMinimumHeight(40)
+        self.toggle_incorrect_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_incorrect_btn.clicked.connect(self._toggle_incorrect)
+        self.toggle_incorrect_btn.setEnabled(False)
+        preview_layout.addWidget(self.toggle_incorrect_btn)
+        
+        scroll.setWidget(inner)
+        preview_outer.addWidget(scroll)
+        
+        content_layout.addWidget(self.preview_panel)
+        layout.addLayout(content_layout, 1)
         
         # ===== BUTTONS =====
         button_layout = QHBoxLayout()
@@ -1287,18 +2035,28 @@ class HistoryDialog(QDialog):
         
         refresh_btn = QPushButton("🔄 Odśwież")
         refresh_btn.setProperty("class", "secondary")
+        refresh_btn.setMinimumHeight(40)
         refresh_btn.setCursor(Qt.PointingHandCursor)
         refresh_btn.clicked.connect(self.refresh_table)
         button_layout.addWidget(refresh_btn)
         
-        export_btn = QPushButton("📥 Eksportuj CSV")
-        export_btn.setProperty("class", "accent")
-        export_btn.setCursor(Qt.PointingHandCursor)
-        export_btn.clicked.connect(self.export_to_csv)
-        button_layout.addWidget(export_btn)
+        export_csv_btn = QPushButton("📊 Eksportuj CSV")
+        export_csv_btn.setProperty("class", "accent")
+        export_csv_btn.setMinimumHeight(40)
+        export_csv_btn.setCursor(Qt.PointingHandCursor)
+        export_csv_btn.clicked.connect(self.export_to_csv)
+        button_layout.addWidget(export_csv_btn)
+        
+        export_pdf_btn = QPushButton("📄 Eksportuj PDF")
+        export_pdf_btn.setProperty("class", "primary")
+        export_pdf_btn.setMinimumHeight(40)
+        export_pdf_btn.setCursor(Qt.PointingHandCursor)
+        export_pdf_btn.clicked.connect(self.export_to_pdf)
+        button_layout.addWidget(export_pdf_btn)
         
         delete_btn = QPushButton("🗑️ Usuń zaznaczone")
         delete_btn.setProperty("class", "danger")
+        delete_btn.setMinimumHeight(40)
         delete_btn.setCursor(Qt.PointingHandCursor)
         delete_btn.clicked.connect(self.delete_selected)
         button_layout.addWidget(delete_btn)
@@ -1308,6 +2066,7 @@ class HistoryDialog(QDialog):
         close_btn = QPushButton("Zamknij")
         close_btn.setProperty("class", "secondary")
         close_btn.setFixedWidth(120)
+        close_btn.setMinimumHeight(40)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.clicked.connect(self.close)
         button_layout.addWidget(close_btn)
@@ -1317,73 +2076,205 @@ class HistoryDialog(QDialog):
         # Załaduj dane
         self.refresh_table()
     
+    def _load_thumbnail(self, filename: str, max_w: int, max_h: int) -> Optional[QPixmap]:
+        """Ładuje miniaturę z pliku obrazu."""
+        if not filename:
+            return None
+        img = self.db.get_image(filename)
+        if img is None:
+            return None
+        return cv2_to_qpixmap(img, max_width=max_w, max_height=max_h)
+    
+    def _on_row_selected(self, row, col, prev_row, prev_col):
+        """Aktualizuje podgląd po zaznaczeniu wiersza."""
+        if row < 0 or row >= len(self._detections_cache):
+            self._clear_preview()
+            return
+        
+        det = self._detections_cache[row]
+        
+        # Pojazd
+        self._set_preview_image(self.preview_car_img, det.get('car_image_filename'), "Brak obrazu")
+        
+        # Grad-CAM
+        self._set_preview_image(self.preview_gradcam_img, det.get('gradcam_image_filename'), "Brak Grad-CAM")
+        
+        # Tablica
+        self._set_preview_image(self.preview_plate_img, det.get('plate_image_filename'), "Brak tablicy")
+        
+        # Aktualizuj przycisk oznaczenia błędnego
+        self.toggle_incorrect_btn.setEnabled(True)
+        is_inc = det.get('is_incorrect', 0)
+        if is_inc:
+            self.toggle_incorrect_btn.setText("✅ Oznacz jako poprawny")
+            self.toggle_incorrect_btn.setProperty("class", "primary")
+        else:
+            self.toggle_incorrect_btn.setText("⚠️ Oznacz jako błędny")
+            self.toggle_incorrect_btn.setProperty("class", "danger")
+        self.toggle_incorrect_btn.style().unpolish(self.toggle_incorrect_btn)
+        self.toggle_incorrect_btn.style().polish(self.toggle_incorrect_btn)
+    
+    def _set_preview_image(self, label: QLabel, filename: str, placeholder: str):
+        """Ustawia pixmap w podglądzie lub tekst zastępczy."""
+        if filename:
+            img = self.db.get_image(filename)
+            if img is not None:
+                pix = cv2_to_qpixmap(img, max_width=label.width(), max_height=label.height())
+                label.setScaledContents(False)
+                label.setPixmap(pix)
+                return
+        label.clear()
+        label.setScaledContents(False)
+        label.setText(placeholder)
+        label.setStyleSheet("background-color: #111827; border-radius: 8px; color: #4b5563; font-size: 11px;")
+    
+    def _clear_preview(self):
+        for lbl, txt in [
+            (self.preview_car_img, "Brak obrazu"),
+            (self.preview_gradcam_img, "Brak Grad-CAM"),
+            (self.preview_plate_img, "Brak tablicy"),
+        ]:
+            lbl.clear()
+            lbl.setScaledContents(False)
+            lbl.setText(txt)
+            lbl.setStyleSheet("background-color: #111827; border-radius: 8px; color: #4b5563; font-size: 11px;")
+        self.toggle_incorrect_btn.setEnabled(False)
+    
+    def _toggle_incorrect(self):
+        """Przełącza flagę błędnego wyniku."""
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._detections_cache):
+            return
+        
+        det = self._detections_cache[row]
+        det_id = det.get('id')
+        if det_id is None:
+            return
+        
+        new_val = self.db.toggle_incorrect(det_id)
+        
+        # Odśwież wiersz
+        self._detections_cache[row]['is_incorrect'] = int(new_val)
+        status_item = self.table.item(row, 7)
+        if status_item:
+            status_item.setText("⚠️ Tak" if new_val else "✓ Nie")
+            if new_val:
+                for c in range(self.table.columnCount()):
+                    item = self.table.item(row, c)
+                    if item:
+                        item.setBackground(QColor("#3b1a1a"))
+            else:
+                for c in range(self.table.columnCount()):
+                    item = self.table.item(row, c)
+                    if item:
+                        item.setBackground(QColor("#1f2937"))
+        
+        # Aktualizuj przycisk
+        if new_val:
+            self.toggle_incorrect_btn.setText("✅ Oznacz jako poprawny")
+            self.toggle_incorrect_btn.setProperty("class", "primary")
+        else:
+            self.toggle_incorrect_btn.setText("⚠️ Oznacz jako błędny")
+            self.toggle_incorrect_btn.setProperty("class", "danger")
+        self.toggle_incorrect_btn.style().unpolish(self.toggle_incorrect_btn)
+        self.toggle_incorrect_btn.style().polish(self.toggle_incorrect_btn)
+    
     def refresh_table(self):
         """Odświeża tabelę z danymi z bazy."""
         try:
             self.table.setRowCount(0)
+            self._detections_cache = []
+            self._clear_preview()
             
             brand_filter = self.brand_filter.text().strip().upper()
             plate_filter = self.plate_filter.text().strip().upper()
+            inc_filter_idx = self.incorrect_filter.currentIndex()
             
-            # Pobierz wszystkie dane z bazy
             detections = self.db.get_all_detections(limit=1000)
             
-            # Filtruj
             filtered = detections
             if brand_filter:
-                filtered = [d for d in filtered if d['car_brand'] and brand_filter in d['car_brand'].upper()]
+                filtered = [d for d in filtered if d.get('car_brand') and brand_filter in d['car_brand'].upper()]
             if plate_filter:
-                filtered = [d for d in filtered if d['plate_text'] and plate_filter in d['plate_text'].upper()]
+                filtered = [d for d in filtered if d.get('plate_text') and plate_filter in d['plate_text'].upper()]
+            if inc_filter_idx == 1:  # Tylko poprawne
+                filtered = [d for d in filtered if not d.get('is_incorrect')]
+            elif inc_filter_idx == 2:  # Tylko błędne
+                filtered = [d for d in filtered if d.get('is_incorrect')]
             
-            # Aktualizuj statystyki
             total = len(detections)
-            with_car = sum(1 for d in detections if d['car_detected'])
-            with_plate = sum(1 for d in detections if d['plate_detected'])
-            self.stats_label.setText(f"Łącznie: {total} | Z pojazdem: {with_car} | Z tablicą: {with_plate} | Filtrowano: {len(filtered)}")
+            with_car = sum(1 for d in detections if d.get('car_detected'))
+            with_plate = sum(1 for d in detections if d.get('plate_detected'))
+            incorrect = sum(1 for d in detections if d.get('is_incorrect'))
+            self.stats_label.setText(
+                f"Łącznie: {total}  |  Z pojazdem: {with_car}  |  "
+                f"Z tablicą: {with_plate}  |  Błędne: {incorrect}  |  Pokazane: {len(filtered)}"
+            )
             
-            # Dodaj wiersze do tabeli
+            self._detections_cache = filtered
+            
             for detection in filtered:
                 row = self.table.rowCount()
                 self.table.insertRow(row)
                 
+                is_inc = detection.get('is_incorrect', 0)
+                bg = QColor("#3b1a1a") if is_inc else QColor("#1f2937")
+                
                 # ID
                 item_id = QTableWidgetItem(str(detection['id']))
+                item_id.setBackground(bg)
                 self.table.setItem(row, 0, item_id)
                 
                 # Data/Czas
-                timestamp = detection['timestamp'][:16] if detection['timestamp'] else ''
+                timestamp = (detection.get('timestamp') or '')[:16]
                 item_time = QTableWidgetItem(timestamp)
+                item_time.setBackground(bg)
                 self.table.setItem(row, 1, item_time)
                 
                 # Marka
-                brand = detection['car_brand'] or '---'
+                brand = detection.get('car_brand') or '---'
                 item_brand = QTableWidgetItem(brand)
+                item_brand.setBackground(bg)
                 self.table.setItem(row, 2, item_brand)
                 
                 # Pewność marki
-                brand_conf = f"{detection['brand_confidence']*100:.1f}%" if detection['brand_confidence'] else '0%'
-                item_brand_conf = QTableWidgetItem(brand_conf)
-                self.table.setItem(row, 3, item_brand_conf)
+                bc = detection.get('brand_confidence') or 0
+                brand_conf = f"{bc*100:.1f}%"
+                item_bc = QTableWidgetItem(brand_conf)
+                item_bc.setBackground(bg)
+                if bc >= 0.8:
+                    item_bc.setForeground(QColor("#3fb950"))
+                elif bc >= 0.5:
+                    item_bc.setForeground(QColor("#d29922"))
+                else:
+                    item_bc.setForeground(QColor("#f85149"))
+                self.table.setItem(row, 3, item_bc)
                 
                 # Tablica
-                plate = detection['plate_text'] or '---'
+                plate = detection.get('plate_text') or '---'
                 item_plate = QTableWidgetItem(plate)
+                item_plate.setBackground(bg)
                 self.table.setItem(row, 4, item_plate)
                 
                 # Pewność tablicy
-                plate_conf = f"{detection['plate_confidence']*100:.1f}%" if detection['plate_confidence'] else '0%'
-                item_plate_conf = QTableWidgetItem(plate_conf)
-                self.table.setItem(row, 5, item_plate_conf)
+                pc = detection.get('plate_confidence') or 0
+                plate_conf = f"{pc*100:.1f}%"
+                item_pc = QTableWidgetItem(plate_conf)
+                item_pc.setBackground(bg)
+                self.table.setItem(row, 5, item_pc)
                 
-                # Auto (binary indicator)
-                car_icon = "✅" if detection['car_detected'] else "❌"
-                item_car = QTableWidgetItem(car_icon)
-                self.table.setItem(row, 6, item_car)
+                # Status (auto/tablica)
+                car_icon = "✅" if detection.get('car_detected') else "❌"
+                plate_icon = "✅" if detection.get('plate_detected') else "❌"
+                item_status = QTableWidgetItem(f"{car_icon} / {plate_icon}")
+                item_status.setBackground(bg)
+                self.table.setItem(row, 6, item_status)
                 
-                # Tablica (binary indicator)
-                plate_icon = "✅" if detection['plate_detected'] else "❌"
-                item_plt = QTableWidgetItem(plate_icon)
-                self.table.setItem(row, 7, item_plt)
+                # Błędny?
+                inc_text = "⚠️ Tak" if is_inc else "✓ Nie"
+                item_inc = QTableWidgetItem(inc_text)
+                item_inc.setBackground(bg)
+                self.table.setItem(row, 7, item_inc)
             
             logger.info(f"Loaded {len(filtered)} detections")
             
@@ -1395,18 +2286,38 @@ class HistoryDialog(QDialog):
         """Eksportuje dane do pliku CSV."""
         try:
             filepath, _ = QFileDialog.getSaveFileName(
-                self, "Eksportuj do CSV", "", "CSV Files (*.csv)"
+                self, "Eksportuj do CSV", "carvision_export.csv", "CSV Files (*.csv)"
             )
-            
             if not filepath:
                 return
             
             self.db.export_to_csv(filepath)
-            QMessageBox.information(self, "Sukces", f"Dane zostały wyeksportowane do:\n{filepath}")
-            
+            QMessageBox.information(self, "Sukces", f"Dane wyeksportowane do:\n{filepath}")
         except Exception as e:
-            logger.error(f"Error exporting: {e}")
-            QMessageBox.critical(self, "Błąd", f"Nie udało się wyeksportować:\n{str(e)}")
+            logger.error(f"Error exporting CSV: {e}")
+            QMessageBox.critical(self, "Błąd", f"Nie udało się wyeksportować CSV:\n{str(e)}")
+    
+    def export_to_pdf(self):
+        """Eksportuje dane do pliku PDF z obrazkami."""
+        try:
+            filepath, _ = QFileDialog.getSaveFileName(
+                self, "Eksportuj do PDF", "carvision_raport.pdf", "PDF Files (*.pdf)"
+            )
+            if not filepath:
+                return
+            
+            dets = self._detections_cache if self._detections_cache else None
+            self.db.export_to_pdf(filepath, dets)
+            QMessageBox.information(self, "Sukces", f"Raport PDF wyeksportowany do:\n{filepath}")
+        except ImportError:
+            QMessageBox.warning(
+                self, "Brak biblioteki",
+                "Do eksportu PDF potrzebna jest biblioteka reportlab.\n\n"
+                "Zainstaluj: pip install reportlab"
+            )
+        except Exception as e:
+            logger.error(f"Error exporting PDF: {e}")
+            QMessageBox.critical(self, "Błąd", f"Nie udało się wyeksportować PDF:\n{str(e)}")
     
     def delete_selected(self):
         """Usuwa zaznaczone rekordy z bazy."""
@@ -1415,7 +2326,6 @@ class HistoryDialog(QDialog):
             QMessageBox.warning(self, "Brak zaznaczenia", "Zaznacz rekordy do usunięcia")
             return
         
-        # Pobierz unikalne wiersze
         rows = set(idx.row() for idx in selected_rows)
         
         reply = QMessageBox.question(
@@ -1434,7 +2344,6 @@ class HistoryDialog(QDialog):
             
             QMessageBox.information(self, "Sukces", f"Usunięto {len(rows)} rekord(ów)")
             self.refresh_table()
-            
         except Exception as e:
             logger.error(f"Error deleting: {e}")
             QMessageBox.critical(self, "Błąd", f"Nie udało się usunąć:\n{str(e)}")
@@ -1456,7 +2365,7 @@ class HeatmapDialog(QDialog):
         layout.setSpacing(20)
         
         header = QVBoxLayout()
-        title = QLabel(f"🔥 Mapa aktywacji dla: {brand}")
+        title = QLabel(f" Mapa aktywacji dla: {brand}")
         title.setStyleSheet("font-size: 22px; font-weight: 700; color: #f0f6fc;")
         header.addWidget(title)
         

@@ -22,3 +22,6 @@ paddleocr==2.9.1
 
 # Dodatkowe
 Pillow>=10.0.0
+tqdm>=4.66.0
+icrawler>=0.6.7
+reportlab>=4.0

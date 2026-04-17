@@ -7,28 +7,28 @@ Obsługuje tablice europejskie (polskie, niemieckie, itp.)
 import os
 import cv2
 import numpy as np
-from paddleocr import PaddleOCR
 from ultralytics import YOLO
 from typing import Tuple, Optional, List
 import torch
 import re
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
 class ANPRModule:
     """Klasa do automatycznego rozpoznawania tablic rejestracyjnych."""
     
-    def __init__(self, license_plate_model_path: str = None, gpu: bool = False):
+    def __init__(self, license_plate_model_path: str = None, gpu: bool = None):
         """
         Inicjalizacja modułu ANPR.
         
         Args:
             license_plate_model_path: Ścieżka do modelu wykrywania tablic (YOLO)
-            gpu: Czy używać GPU dla OCR
+            gpu: Czy używać GPU dla OCR (None = auto-detekcja)
         """
+        if gpu is None:
+            gpu = torch.cuda.is_available()
         # Domyślna ścieżka do modelu wykrywania tablic
         if license_plate_model_path is None:
             app_dir = os.path.dirname(os.path.abspath(__file__))
@@ -48,20 +48,20 @@ class ANPRModule:
         self.plate_detector = YOLO(license_plate_model_path)
         logger.info(f"✔ Plate detector loaded: {os.path.basename(license_plate_model_path)}")
         
-        # Inicjalizacja PaddleOCR
-        try:
-            logger.info("Initializing PaddleOCR...")
-            device = 'gpu' if gpu else 'cpu'
-            self.ocr_reader = PaddleOCR(
-                use_angle_cls=True,
-                lang='en',
-                show_log=False,
-            )
-            logger.info(f"✓ PaddleOCR initialized (device={device})")
-        except Exception as e:
-            logger.error(f"Failed to initialize PaddleOCR: {e}")
-            raise
+        # Leniwa inicjalizacja PaddleOCR — import i tworzenie dopiero przy pierwszym użyciu
+        self._gpu = gpu
+        self._ocr_reader = None
         
+        # Kody krajów EU/EEA na niebieskim pasie tablicy — do ignorowania
+        self.EU_COUNTRY_CODES = {
+            'A', 'AL', 'AND', 'ARM', 'AZ', 'B', 'BG', 'BIH', 'BY', 'CH',
+            'CY', 'CZ', 'D', 'DK', 'E', 'EST', 'F', 'FIN', 'FL', 'FR',
+            'GB', 'GBG', 'GBJ', 'GBM', 'GBZ', 'GE', 'GR', 'H', 'HR',
+            'HU', 'I', 'IRL', 'IS', 'KOS', 'L', 'LT', 'LV', 'M', 'MC',
+            'MD', 'ME', 'MK', 'MNE', 'N', 'NL', 'NMK', 'P', 'PL', 'RKS',
+            'RO', 'RSM', 'RUS', 'S', 'SK', 'SLO', 'SRB', 'TR', 'UA', 'V',
+        }
+
         # Mapowanie podobnych znaków dla korekcji OCR
         self.similar_chars = {
             '0': 'O', 'O': '0',
@@ -74,6 +74,24 @@ class ANPRModule:
             'D': '0', 'Q': '0',
         }
     
+    @property
+    def ocr_reader(self):
+        """Leniwa inicjalizacja PaddleOCR — import i tworzenie przy pierwszym użyciu."""
+        if self._ocr_reader is None:
+            from paddleocr import PaddleOCR
+            logger.info("Initializing PaddleOCR (lazy)...")
+            self._ocr_reader = PaddleOCR(
+                use_angle_cls=True,
+                lang='en',
+                show_log=False,
+                use_gpu=self._gpu,
+                det_db_thresh=0.3,
+                det_db_box_thresh=0.45,
+                rec_batch_num=8,
+            )
+            logger.info(f"✓ PaddleOCR initialized (gpu={self._gpu})")
+        return self._ocr_reader
+
     def detect_license_plate(self, image: np.ndarray) -> Tuple[Optional[list], float]:
         """
         Wykrywa tablicę rejestracyjną na obrazie.
@@ -104,8 +122,8 @@ class ANPRModule:
         x1, y1, x2, y2 = bbox
         h, w = image.shape[:2]
         
-        # Większy margines - 15% zamiast 5%
-        margin_x = int((x2 - x1) * 0.15)
+        # Większy margines horyzontalny (20%) — nie obcinaj skrajnych liter
+        margin_x = int((x2 - x1) * 0.20)
         margin_y = int((y2 - y1) * 0.15)
         
         x1 = max(0, x1 - margin_x)
@@ -118,53 +136,46 @@ class ANPRModule:
     def preprocess_plate_variants(self, plate_crop: np.ndarray) -> List[np.ndarray]:
         """
         Tworzy warianty przetworzenia obrazu tablicy dla OCR.
-        Różne warianty dla lepszego rozpoznawania wszystkich części tablicy.
+        4 warianty: surowy, wyostrzony+CLAHE, Otsu, adaptacyjny.
         """
         variants = []
-        
-        # Wariant 0: Oryginalny rozmiar z minimalnym preprocessingiem
-        gray_orig = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-        enhanced_orig = clahe.apply(gray_orig)
-        variants.append(cv2.cvtColor(enhanced_orig, cv2.COLOR_GRAY2BGR))
-        logger.debug(f"Added original size variant: {plate_crop.shape}")
-        
-        # 1. Powiększenie obrazu
         h, w = plate_crop.shape[:2]
-        scale = max(4, 200 // h)  # Bardziej agresywne skalowanie
-        enlarged = cv2.resize(plate_crop, (w * scale, h * scale), interpolation=cv2.INTER_LINEAR)
-        
+
+        # Wyższe skalowanie — 300px wysokości zamiast 200
+        scale = max(4, 300 // max(h, 1))
+        enlarged = cv2.resize(plate_crop, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+
+        # Wariant 0: Surowy powiększony (bez filtrów — PaddleOCR sam sobie radzi)
+        variants.append(enlarged.copy())
+
         # Konwersja do szarości
         gray = cv2.cvtColor(enlarged, cv2.COLOR_BGR2GRAY)
-        
-        # 2. Wyostrzanie
+
+        # Wyostrzanie
         gaussian = cv2.GaussianBlur(gray, (0, 0), 2)
-        sharpened = cv2.addWeighted(gray, 1.3, gaussian, -0.3, 0)
-        
-        # 3. CLAHE
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        sharpened = cv2.addWeighted(gray, 1.5, gaussian, -0.5, 0)
+
+        # CLAHE
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(sharpened)
-        
-        # Wariant 1: Wyostrzony z CLAHE (najczęściej skuteczny)
+
+        # Wariant 1: Wyostrzony z CLAHE
         variants.append(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR))
-        
+
         # Wariant 2: Binaryzacja Otsu
         _, otsu = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         variants.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR))
-        
-        # Wariant 3: Adaptacyjna binaryzacja
-        adaptive = cv2.adaptiveThreshold(enhanced, 255, 
-                                         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                         cv2.THRESH_BINARY, 11, 2)
+
+        # Wariant 3: Adaptacyjny threshold (dobry na nierówne oświetlenie)
+        adaptive = cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, 10
+        )
+        # Morfologia — zamknij przerwy w glifach
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        adaptive = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel)
         variants.append(cv2.cvtColor(adaptive, cv2.COLOR_GRAY2BGR))
-        
-        # Wariant 4: Oryginalny powiększony (fallback)
-        variants.append(enlarged)
-        
-        # Wariant 5: Binaryzacja odwrócona (może pomóc jeśli tablica ma ciemne tło)
-        _, otsu_inv = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        variants.append(cv2.cvtColor(otsu_inv, cv2.COLOR_GRAY2BGR))
-        
+
         return variants
     
     def clean_plate_text(self, text: str) -> str:
@@ -258,14 +269,22 @@ class ANPRModule:
         
         # Wzorce tablic rejestracyjnych (od najbardziej specyficznych)
         patterns = [
+            # Polskie nowe: 2 litery + 5 cyfr (np. WA12345)
+            (r'^[A-Z]{2}[0-9]{5}$', 100),
+            # Polskie nowe: 3 litery + 5 cyfr (np. FMI66259, DPL12345)
+            (r'^[A-Z]{3}[0-9]{5}$', 100),
+            # Polskie nowe: 2 litery + 4 cyfry + 1 litera (np. WI1234A)
+            (r'^[A-Z]{2}[0-9]{4}[A-Z]$', 100),
+            # Polskie nowe: 3 litery + 4 cyfry + 1 litera (np. FMI1234A)
+            (r'^[A-Z]{3}[0-9]{4}[A-Z]$', 100),
+            # Polskie nowe: 2-3 litery + 4 cyfry (np. KR1234)
+            (r'^[A-Z]{2,3}[0-9]{4}$', 95),
             # Brytyjskie: MT62FPV (2 litery + 2 cyfry + 3 litery)
             (r'^[A-Z]{2}[0-9]{2}[A-Z]{3}$', 100),
             # Niemieckie krótkie: WOBG404 (2-3 litery + 1 litera + 3-4 cyfry)
             (r'^[A-Z]{2,3}[A-Z]{1}[0-9]{3,4}$', 100),
             # Niemieckie standardowe: WOBAW642
             (r'^[A-Z]{1,3}[A-Z]{2}[0-9]{1,4}$', 100),
-            # Polskie: WA12345, KR1234A
-            (r'^[A-Z]{2,3}[0-9]{4,5}[A-Z]?$', 90),
             # Ogólne europejskie z cyframi
             (r'^[A-Z]{1,3}[0-9]{1,4}[A-Z]{0,3}$', 70),
         ]
@@ -336,19 +355,86 @@ class ANPRModule:
         
         return text
     
+    def _remove_eu_blue_strip(self, plate_crop: np.ndarray) -> np.ndarray:
+        """
+        Wykrywa i usuwa niebieski pas z kodem kraju EU z lewej strony tablicy.
+        Konserwatywne podejście — lepiej zostawić trochę niebieskiego niż obciąć literę.
+        """
+        try:
+            h, w = plate_crop.shape[:2]
+            # Sprawdzamy maks. lewą 15% obrazu (nie 25% — zbyt agresywne)
+            max_strip = max(1, int(w * 0.15))
+            hsv = cv2.cvtColor(plate_crop[:, :max_strip], cv2.COLOR_BGR2HSV)
+            blue_mask = cv2.inRange(
+                hsv,
+                np.array([95, 60, 40], dtype=np.uint8),
+                np.array([145, 255, 255], dtype=np.uint8),
+            )
+            # Znajdź ostatnią kolumnę z dominującym niebieskim (>40% pikseli)
+            strip_end = 0
+            gap_count = 0
+            for col_idx in range(max_strip):
+                blue_ratio = np.sum(blue_mask[:, col_idx] > 0) / h
+                if blue_ratio > 0.40:
+                    strip_end = col_idx + 1
+                    gap_count = 0
+                else:
+                    gap_count += 1
+                    # Koniec pasa — 3 kolumny bez niebieskiego
+                    if gap_count >= 3 and strip_end > 0:
+                        break
+            # Cofnij o 4px bufor — nie obcinaj glifów stykających się z pasem
+            strip_end = max(0, strip_end - 4)
+            if strip_end > 0:
+                logger.debug(f"Usunięto niebieski pas EU: {strip_end}px z lewej (img_w={w})")
+                return plate_crop[:, strip_end:]
+        except Exception as e:
+            logger.debug(f"Błąd usuwania niebieskiego pasa EU: {e}")
+        return plate_crop
+
+    def _strip_eu_country_prefix(self, text: str) -> str:
+        """
+        Usuwa prefiks kodu kraju EU z rozpoznanego tekstu tablicy.
+        Np. "PLSC6271X" -> "SC6271X".
+        UWAGA: Nie stripuje jednoliterowych kodów (F, D, I, S, N, B, E, H, L, M, V itd.)
+        bo zbyt często pokrywają się z pierwszą literą kodu regionu tablicy.
+        """
+        for length in (3, 2):  # tylko 2-3 literowe kody — jednoliterowe pomijamy
+            if len(text) > length + 4:  # musi zostać co najmniej 5 znaków
+                prefix = text[:length]
+                remainder = text[length:]
+                if prefix in self.EU_COUNTRY_CODES:
+                    # Upewnij się, że reszta wygląda jak tablica
+                    if remainder and remainder[0].isalpha():
+                        # Dodatkowa walidacja: reszta musi być lepsza niż całość
+                        _, score_full = self.validate_plate_format(text)
+                        _, score_rest = self.validate_plate_format(remainder)
+                        if score_rest > score_full:
+                            logger.debug(f"Usunięto prefiks kraju '{prefix}' z '{text}' -> '{remainder}'")
+                            return remainder
+        return text
+
     def read_plate_text(self, plate_crop: np.ndarray) -> Tuple[Optional[str], float]:
         """
         Odczytuje tekst z obrazu tablicy rejestracyjnej.
         Próbuje wielu wariantów preprocessingu dla lepszych wyników.
+        Uruchamia OCR zarówno na oryginale jak i po usunięciu pasa EU.
         """
-        # Generuj warianty obrazu
-        variants = self.preprocess_plate_variants(plate_crop)
-        logger.debug(f"Liczba wariantów preprocessingu: {len(variants)}")
+        plate_no_strip = self._remove_eu_blue_strip(plate_crop)
+
+        # Dwa zestawy wariantów: z oryginalnym cropem i bez pasa EU
+        all_variants = []
+        all_variants.extend(self.preprocess_plate_variants(plate_no_strip))
+        # Jeśli usunięto pas, dodaj też oryginał (zabezpieczenie przed zbyt agresywnym cięciem)
+        if plate_no_strip is not plate_crop:
+            all_variants.extend(self.preprocess_plate_variants(plate_crop))
+
+        logger.debug(f"Liczba wariantów preprocessingu: {len(all_variants)}")
         
         all_candidates = []
         
         # OCR na każdym wariancie
-        for i, variant in enumerate(variants):
+        for i, variant in enumerate(all_variants):
             try:
                 results = self.ocr_reader.ocr(variant, cls=True)
                 logger.debug(f"Wariant {i}: raw results type={type(results)}")
@@ -371,8 +457,9 @@ class ANPRModule:
                     bbox, (text, score) = detection[0], detection[1]
                     cleaned = self.clean_plate_text(text)
                     logger.debug(f"  OCR fragment: '{text}' -> '{cleaned}' (score={score:.3f})")
-                    # Pomijaj fragmenty będące wyłącznie cyframi (np. "60", "80" = pas kraju EU/GB)
-                    if len(cleaned) >= 2 and not cleaned.isdigit():
+                    # Do łączenia: akceptuj wszystkie fragmenty >= 1 znaku (także same cyfry)
+                    # ale odfiltruj kody krajów EU (PL, D, etc.)
+                    if len(cleaned) >= 1 and cleaned not in self.EU_COUNTRY_CODES:
                         variant_texts.append(cleaned)
                         variant_scores.append(score)
 
@@ -421,8 +508,9 @@ class ANPRModule:
         best_candidate = self.select_best_candidate(all_candidates)
         
         if best_candidate:
-            logger.info(f"Selected best candidate: '{best_candidate['text']}'")
-            return best_candidate['text'], best_candidate['score']
+            final_text = self._strip_eu_country_prefix(best_candidate['text'])
+            logger.info(f"Selected best candidate: '{best_candidate['text']}' -> '{final_text}'")
+            return final_text, best_candidate['score']
         
         logger.warning("No best candidate selected")
         return None, 0.0
@@ -430,24 +518,31 @@ class ANPRModule:
     def select_best_candidate(self, candidates: List[dict]) -> Optional[dict]:
         """
         Wybiera najlepszy kandydat z listy rozpoznanych tekstów.
-        Preferuje pełne tablice (więcej znaków) nad fragmentami.
+        Preferuje pełne tablice z pasującym formatem.
         """
         if not candidates:
             return None
-        
-        logger.debug(f"All candidates: {[(c['text'], round(c['score'],2), c.get('is_valid')) for c in candidates]}")
-        
-        # Scoring: ważny jest format, długość tekstu i confidence
+
+        logger.debug(f"All candidates: {[(c['text'], round(c['score'],2), c.get('format_score',0), c.get('is_valid')) for c in candidates]}")
+
         def candidate_score(c):
             length = len(c['text'])
-            # Preferuj tablice 6-9 znaków
-            length_bonus = 2.0 if 6 <= length <= 9 else (1.0 if 5 <= length <= 10 else 0.3)
-            valid_bonus = 1.5 if c.get('is_valid') else 1.0
-            return c['score'] * length_bonus * valid_bonus
-        
+            # Preferuj tablice 6-9 znaków, akceptuj 5 i 10
+            if 6 <= length <= 9:
+                length_bonus = 2.0
+            elif length == 5 or length == 10:
+                length_bonus = 1.3
+            else:
+                length_bonus = 0.3
+            # Mocny bonus za pasujący format tablicy
+            fmt = c.get('format_score', 0)
+            format_bonus = 1.0 + fmt / 50.0  # 100 format_score → 3.0x
+            valid_bonus = 1.3 if c.get('is_valid') else 1.0
+            return c['score'] * length_bonus * format_bonus * valid_bonus
+
         sorted_candidates = sorted(candidates, key=candidate_score, reverse=True)
         logger.debug(f"Top candidates: {[(c['text'], round(candidate_score(c),3)) for c in sorted_candidates[:5]]}")
-        
+
         return sorted_candidates[0]
     
     def format_european_plate(self, text: str) -> str:

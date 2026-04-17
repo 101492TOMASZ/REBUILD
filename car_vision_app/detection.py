@@ -9,13 +9,6 @@ import torch
 from ultralytics import YOLO
 from typing import Tuple, Optional, List
 
-# Patch dla PyTorch 2.6+ - umożliwia ładowanie modeli YOLO
-_original_torch_load = torch.load
-def _patched_torch_load(*args, **kwargs):
-    kwargs.setdefault('weights_only', False)
-    return _original_torch_load(*args, **kwargs)
-torch.load = _patched_torch_load
-
 
 class CarDetector:
     """Klasa do wykrywania pojazdów na obrazie przy użyciu YOLOv8."""
