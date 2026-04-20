@@ -4,3 +4,6 @@ __pycache__
 .venv
 dataset_german
 .pytest_cache
+dataset_german_augmented
+.csv
+.pdf

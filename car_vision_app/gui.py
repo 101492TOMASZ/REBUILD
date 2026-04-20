@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QScrollArea
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QPropertyAnimation, QEasingCurve, QUrl
-from PySide6.QtGui import QPixmap, QImage, QFont, QColor
+from PySide6.QtGui import QPixmap, QImage, QFont, QColor, QIcon
 
 
 def _import_modules():
@@ -1064,7 +1064,7 @@ class MainWindow(QMainWindow):
         self.hamburger_btn.clicked.connect(self.toggle_sidebar)
         top_bar.addWidget(self.hamburger_btn)
 
-        title_lbl = QLabel("🚗 CarVision AI")
+        title_lbl = QLabel("CarVision AI")
         title_lbl.setProperty("class", "title")
         top_bar.addWidget(title_lbl)
 
@@ -1136,7 +1136,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.setSpacing(8)
 
         sidebar_title = QLabel("MENU")
-        sidebar_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #6b7280; letter-spacing: 2px; padding-bottom: 4px;")
+        sidebar_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #6b7280; letter-spacing: 2px; padding-bottom: 4px; border: none;")
         sidebar_layout.addWidget(sidebar_title)
 
         self.heatmap_btn = QPushButton("🔥  Mapa ciepła")
@@ -1151,6 +1151,7 @@ class MainWindow(QMainWindow):
         self.crops_btn.setProperty("class", "secondary")
         self.crops_btn.setMinimumHeight(44)
         self.crops_btn.setCursor(Qt.PointingHandCursor)
+        self.crops_btn.setEnabled(False)
         self.crops_btn.clicked.connect(self.toggle_crops_window)
         sidebar_layout.addWidget(self.crops_btn)
 
@@ -1167,6 +1168,7 @@ class MainWindow(QMainWindow):
         self.save_db_btn.setCursor(Qt.PointingHandCursor)
         self.save_db_btn.setEnabled(False)
         self.save_db_btn.clicked.connect(self.save_to_database)
+        self.save_db_btn.setVisible(False)
         sidebar_layout.addWidget(self.save_db_btn)
 
         self.history_btn = QPushButton("📋  Historia")
@@ -1327,6 +1329,7 @@ class MainWindow(QMainWindow):
         self.brand_card.reset()
         self.plate_card.reset()
         self.heatmap_btn.setEnabled(False)
+        self.crops_btn.setEnabled(False)
         self.save_db_btn.setEnabled(False)
         self.last_car_crop = None
         self.last_brand = None
@@ -1352,6 +1355,7 @@ class MainWindow(QMainWindow):
         self.brand_card.reset()
         self.plate_card.reset()
         self.heatmap_btn.setEnabled(False)
+        self.crops_btn.setEnabled(False)
         self.save_db_btn.setEnabled(False)
         self.last_brand = None
         self._brand_done = False
@@ -1423,6 +1427,7 @@ class MainWindow(QMainWindow):
         confidence = results.get('brand_confidence', 0.0)
         self.last_brand = brand
         self.heatmap_btn.setEnabled(True)
+        self.crops_btn.setEnabled(True)
         self.brand_card.set_value(brand, f"Pewność: {confidence:.1f}%")
 
         if confidence >= 80:
@@ -1474,6 +1479,7 @@ class MainWindow(QMainWindow):
     def on_brand_error(self, error: str):
         self.brand_card.set_value("Błąd", "Nie udało się rozpoznać marki")
         self.heatmap_btn.setEnabled(False)
+        self.crops_btn.setEnabled(False)
         self._brand_done = True
         if self._anpr_done:
             self.input_card.setEnabled(True)
@@ -1898,7 +1904,7 @@ class HistoryDialog(QDialog):
             "ID", "Data/Czas", "Marka", "Pewność", "Tablica", "Pewn. tabl.", "Status", "Błędny?"
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.currentCellChanged.connect(self._on_row_selected)
         
         self.table.setStyleSheet("""
@@ -2282,33 +2288,47 @@ class HistoryDialog(QDialog):
             logger.error(f"Error loading history: {e}")
             QMessageBox.critical(self, "Błąd", f"Nie udało się załadować historii:\n{str(e)}")
     
+    def _get_selected_detections(self):
+        """Zwraca listę detekcji z zaznaczonych wierszy lub None jeśli brak zaznaczenia."""
+        selected_rows = set(idx.row() for idx in self.table.selectedIndexes())
+        if not selected_rows or not self._detections_cache:
+            return None
+        return [self._detections_cache[r] for r in sorted(selected_rows) if r < len(self._detections_cache)]
+
     def export_to_csv(self):
-        """Eksportuje dane do pliku CSV."""
+        """Eksportuje zaznaczone rekordy do pliku CSV."""
+        selected = self._get_selected_detections()
+        if not selected:
+            QMessageBox.warning(self, "Brak zaznaczenia", "Zaznacz rekordy do eksportu.")
+            return
         try:
             filepath, _ = QFileDialog.getSaveFileName(
-                self, "Eksportuj do CSV", "carvision_export.csv", "CSV Files (*.csv)"
+                self, f"Eksportuj {len(selected)} rekordów do CSV", "carvision_export.csv", "CSV Files (*.csv)"
             )
             if not filepath:
                 return
             
-            self.db.export_to_csv(filepath)
-            QMessageBox.information(self, "Sukces", f"Dane wyeksportowane do:\n{filepath}")
+            self.db.export_to_csv(filepath, detections=selected)
+            QMessageBox.information(self, "Sukces", f"Wyeksportowano {len(selected)} rekord(ów) do:\n{filepath}")
         except Exception as e:
             logger.error(f"Error exporting CSV: {e}")
             QMessageBox.critical(self, "Błąd", f"Nie udało się wyeksportować CSV:\n{str(e)}")
     
     def export_to_pdf(self):
-        """Eksportuje dane do pliku PDF z obrazkami."""
+        """Eksportuje zaznaczone rekordy do pliku PDF z obrazkami."""
+        selected = self._get_selected_detections()
+        if not selected:
+            QMessageBox.warning(self, "Brak zaznaczenia", "Zaznacz rekordy do eksportu.")
+            return
         try:
             filepath, _ = QFileDialog.getSaveFileName(
-                self, "Eksportuj do PDF", "carvision_raport.pdf", "PDF Files (*.pdf)"
+                self, f"Eksportuj {len(selected)} rekordów do PDF", "carvision_raport.pdf", "PDF Files (*.pdf)"
             )
             if not filepath:
                 return
             
-            dets = self._detections_cache if self._detections_cache else None
-            self.db.export_to_pdf(filepath, dets)
-            QMessageBox.information(self, "Sukces", f"Raport PDF wyeksportowany do:\n{filepath}")
+            self.db.export_to_pdf(filepath, selected)
+            QMessageBox.information(self, "Sukces", f"Raport PDF ({len(selected)} rekordów) wyeksportowany do:\n{filepath}")
         except ImportError:
             QMessageBox.warning(
                 self, "Brak biblioteki",
@@ -2431,6 +2451,10 @@ def run_app(model_path: str, classes_path: str, plate_model_path: str = None):
     """Uruchamia aplikację."""
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLE)
+    
+    icon_path = Path(__file__).parent / "icon.ico"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     
     font = QFont("Segoe UI", 10)
     app.setFont(font)

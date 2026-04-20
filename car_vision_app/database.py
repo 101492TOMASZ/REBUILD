@@ -374,19 +374,21 @@ class Database:
             logger.error(f"Error fetching statistics: {e}")
             return {}
     
-    def export_to_csv(self, filepath: str, plate_text: Optional[str] = None):
+    def export_to_csv(self, filepath: str, plate_text: Optional[str] = None, detections: Optional[list] = None):
         """
         Eksportuj dane do pliku CSV (bez obrazków, tylko metadane).
         
         Args:
             filepath: Ścieżka do pliku CSV
             plate_text: Filtruj po tablicy (opcjonalne)
+            detections: Lista detekcji do eksportu (None = wszystkie)
         """
         try:
-            if plate_text:
-                detections = self.get_detections_by_plate(plate_text)
-            else:
-                detections = self.get_all_detections(limit=10000)
+            if detections is None:
+                if plate_text:
+                    detections = self.get_detections_by_plate(plate_text)
+                else:
+                    detections = self.get_all_detections(limit=10000)
             
             if not detections:
                 logger.warning("No detections to export")
