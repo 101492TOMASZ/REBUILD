@@ -727,33 +727,154 @@ class StatusBar(QFrame):
             self.progress_text.setText("")
 
 
-class CropsWindow(QDialog):
-    """Niemodalny panel z cropami detekcji, wyćcia i tablicy."""
+TAB_STYLE = """
+    QTabWidget::pane { border: none; background-color: transparent; }
+    QTabBar::tab {
+        background-color: #374151; color: #9ca3af;
+        border: none; border-radius: 8px;
+        padding: 8px 20px; margin-right: 6px;
+        font-size: 13px; font-weight: 600;
+    }
+    QTabBar::tab:selected { background-color: #3b82f6; color: #ffffff; }
+    QTabBar::tab:hover:!selected { background-color: #4b5563; color: #e2e8f0; }
+    QWidget { background-color: transparent; }
+"""
+
+INFO_LABEL_STYLE = "color: #6b7280; font-size: 12px; background-color: transparent;"
+
+
+class VisualWindow(QDialog):
+    """Niemodalny panel z cropami detekcji i mapą ciepła GradCAM w jednym oknie."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Podgląd crops")
-        self.setMinimumSize(800, 340)
+        self.setWindowTitle("Podgląd wyników")
+        self.setMinimumSize(960, 460)
         self.setStyleSheet(DARK_STYLE)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
+        # Raw numpy arrays — stored so ScaledLabel can use full-res source
+        self._arr_annotated: Optional[np.ndarray] = None
+        self._arr_crop: Optional[np.ndarray] = None
+        self._arr_plate: Optional[np.ndarray] = None
+        self._arr_orig: Optional[np.ndarray] = None
+        self._arr_heatmap: Optional[np.ndarray] = None
+        self._arr_overlay: Optional[np.ndarray] = None
 
-        self.detection_card = ImageCard("DETEKCJA", "Wykryty pojazd")
-        layout.addWidget(self.detection_card)
+        from PySide6.QtWidgets import QTabWidget
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
 
-        self.crop_card = ImageCard("WYCIĘCIE", "Crop do analizy")
-        layout.addWidget(self.crop_card)
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(TAB_STYLE)
+        root.addWidget(self.tabs)
 
-        self.plate_crop_card = ImageCard("TABLICA", "Crop tablicy")
-        layout.addWidget(self.plate_crop_card)
+        # ── Tab 1: Cropy ──
+        crops_widget = QWidget()
+        crops_widget.setStyleSheet("background-color: transparent;")
+        crops_layout = QVBoxLayout(crops_widget)
+        crops_layout.setContentsMargins(0, 12, 0, 0)
+        crops_layout.setSpacing(8)
+
+        crops_cards = QHBoxLayout()
+        crops_cards.setSpacing(16)
+        self.detection_card = ImageCard("DETEKCJA", "Brak danych")
+        crops_cards.addWidget(self.detection_card)
+        self.crop_card = ImageCard("WYCIĘCIE", "Brak danych")
+        crops_cards.addWidget(self.crop_card)
+        self.plate_crop_card = ImageCard("TABLICA", "Brak danych")
+        crops_cards.addWidget(self.plate_crop_card)
+        crops_layout.addLayout(crops_cards, 1)
+
+        self._crops_info = QLabel("Wyniki bieżącej analizy — detekcja, kadr pojazdu i tablica rejestracyjna")
+        self._crops_info.setAlignment(Qt.AlignCenter)
+        self._crops_info.setStyleSheet(INFO_LABEL_STYLE)
+        crops_layout.addWidget(self._crops_info)
+
+        self.tabs.addTab(crops_widget, "🖼️  Cropy")
+
+        # ── Tab 2: Mapa ciepła ──
+        heat_widget = QWidget()
+        heat_widget.setStyleSheet("background-color: transparent;")
+        heat_layout = QVBoxLayout(heat_widget)
+        heat_layout.setContentsMargins(0, 12, 0, 0)
+        heat_layout.setSpacing(8)
+
+        heat_cards = QHBoxLayout()
+        heat_cards.setSpacing(16)
+        self.heat_orig_card = ImageCard("ORYGINAŁ", "Brak danych")
+        heat_cards.addWidget(self.heat_orig_card)
+        self.heat_map_card = ImageCard("MAPA CIEPŁA", "Brak danych")
+        heat_cards.addWidget(self.heat_map_card)
+        self.heat_overlay_card = ImageCard("NAŁOŻENIE", "Brak danych")
+        heat_cards.addWidget(self.heat_overlay_card)
+        heat_layout.addLayout(heat_cards, 1)
+
+        self._heat_info = QLabel("🔴 Czerwony = wysoki wpływ  •  🔵 Niebieski = niski wpływ")
+        self._heat_info.setAlignment(Qt.AlignCenter)
+        self._heat_info.setStyleSheet(INFO_LABEL_STYLE)
+        heat_layout.addWidget(self._heat_info)
+
+        self.tabs.addTab(heat_widget, "🔥  Mapa ciepła")
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_pixmap(arr: Optional[np.ndarray]) -> Optional[QPixmap]:
+        """Konwertuje ndarray na QPixmap bez ograniczeń rozmiaru."""
+        if arr is None:
+            return None
+        return cv2_to_qpixmap(arr)
+
+    # ── public API ───────────────────────────────────────────────────────────
+
+    def set_crops(self, annotated: Optional[np.ndarray],
+                  crop: Optional[np.ndarray],
+                  plate_crop: Optional[np.ndarray]):
+        """Ustawia obrazy w zakładce Cropy."""
+        if annotated is not None:
+            self._arr_annotated = annotated
+            px = self._to_pixmap(annotated)
+            if px:
+                self.detection_card.set_image(px)
+        if crop is not None:
+            self._arr_crop = crop
+            px = self._to_pixmap(crop)
+            if px:
+                self.crop_card.set_image(px)
+        if plate_crop is not None:
+            self._arr_plate = plate_crop
+            px = self._to_pixmap(plate_crop)
+            if px:
+                self.plate_crop_card.set_image(px)
+
+    def update_heatmap(self, overlay: np.ndarray, heatmap: np.ndarray,
+                       original: np.ndarray, brand: str):
+        """Ustawia obrazy w zakładce Mapa ciepła."""
+        self._arr_overlay = overlay
+        self._arr_heatmap = heatmap
+        self._arr_orig = original
+        self.heat_orig_card.set_image(self._to_pixmap(original))
+        self.heat_map_card.set_image(self._to_pixmap(heatmap))
+        self.heat_overlay_card.set_image(self._to_pixmap(overlay))
+        self._heat_info.setText(
+            f"Marka: {brand}  •  🔴 Czerwony = wysoki wpływ  •  🔵 Niebieski = niski wpływ"
+        )
 
     def clear_all(self):
-        self.detection_card.clear_image()
-        self.crop_card.clear_image()
-        self.plate_crop_card.clear_image()
+        self._arr_annotated = self._arr_crop = self._arr_plate = None
+        self._arr_orig = self._arr_heatmap = self._arr_overlay = None
+        for card in (self.detection_card, self.crop_card, self.plate_crop_card,
+                     self.heat_orig_card, self.heat_map_card, self.heat_overlay_card):
+            card.clear_image()
+        self._heat_info.setText("🔴 Czerwony = wysoki wpływ  •  🔵 Niebieski = niski wpływ")
+
+    def show_crops_tab(self):
+        self.tabs.setCurrentIndex(0)
+
+    def show_heatmap_tab(self):
+        self.tabs.setCurrentIndex(1)
 
 
 class BatchWorker(QThread):
@@ -1013,7 +1134,7 @@ class MainWindow(QMainWindow):
         
         self.last_car_crop = None
         self.last_brand = None
-        self.crops_window = None
+        self.visual_window = None
         self._last_annotated = None
         self._last_car_crop_img = None
         self._last_plate_crop = None
@@ -1022,6 +1143,7 @@ class MainWindow(QMainWindow):
         self._batch_done_count = 0
         self._last_car_crop_with_plate = None
         self._last_gradcam_overlay = None
+        self._last_gradcam_heatmap = None
         self._last_detection_id = None
         
         self.setAcceptDrops(True)
@@ -1139,21 +1261,13 @@ class MainWindow(QMainWindow):
         sidebar_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #6b7280; letter-spacing: 2px; padding-bottom: 4px; border: none;")
         sidebar_layout.addWidget(sidebar_title)
 
-        self.heatmap_btn = QPushButton("🔥  Mapa ciepła")
-        self.heatmap_btn.setProperty("class", "accent")
-        self.heatmap_btn.setMinimumHeight(44)
-        self.heatmap_btn.setCursor(Qt.PointingHandCursor)
-        self.heatmap_btn.setEnabled(False)
-        self.heatmap_btn.clicked.connect(self.show_heatmap)
-        sidebar_layout.addWidget(self.heatmap_btn)
-
-        self.crops_btn = QPushButton("🖼️  Cropy")
-        self.crops_btn.setProperty("class", "secondary")
-        self.crops_btn.setMinimumHeight(44)
-        self.crops_btn.setCursor(Qt.PointingHandCursor)
-        self.crops_btn.setEnabled(False)
-        self.crops_btn.clicked.connect(self.toggle_crops_window)
-        sidebar_layout.addWidget(self.crops_btn)
+        self.visual_btn = QPushButton("🔍 O detekcji")
+        self.visual_btn.setProperty("class", "accent")
+        self.visual_btn.setMinimumHeight(44)
+        self.visual_btn.setCursor(Qt.PointingHandCursor)
+        self.visual_btn.setEnabled(False)
+        self.visual_btn.clicked.connect(self.toggle_visual_window)
+        sidebar_layout.addWidget(self.visual_btn)
 
         sidebar_layout.addSpacing(16)
         sep = QFrame()
@@ -1299,37 +1413,35 @@ class MainWindow(QMainWindow):
             self.status_bar.set_status(f"Wczytano: {os.path.basename(file_path)}", "📷")
             self.analyze_image()
     
-    def toggle_crops_window(self):
-        """Otwiera lub zamyka okno z cropami."""
-        if self.crops_window is None or not self.crops_window.isVisible():
-            if self.crops_window is None:
-                self.crops_window = CropsWindow(self)
+    def toggle_visual_window(self):
+        """Otwiera lub zamyka połączone okno z cropami i heatmapą."""
+        if self.visual_window is None or not self.visual_window.isVisible():
+            if self.visual_window is None:
+                self.visual_window = VisualWindow(self)
             # Uzupełnij okno ostatnimi wynikami jeśli istnieją
-            if self._last_annotated is not None:
-                pixmap = cv2_to_qpixmap(self._last_annotated, max_width=320, max_height=240)
-                self.crops_window.detection_card.set_image(pixmap)
-            if self._last_car_crop_with_plate is not None:
-                pixmap = cv2_to_qpixmap(self._last_car_crop_with_plate, max_width=320, max_height=240)
-                self.crops_window.crop_card.set_image(pixmap)
-            elif self._last_car_crop_img is not None:
-                pixmap = cv2_to_qpixmap(self._last_car_crop_img, max_width=320, max_height=240)
-                self.crops_window.crop_card.set_image(pixmap)
-            if self._last_plate_crop is not None:
-                pixmap = cv2_to_qpixmap(self._last_plate_crop, max_width=320, max_height=100)
-                self.crops_window.plate_crop_card.set_image(pixmap)
-            self.crops_window.show()
-            self.crops_window.raise_()
+            _crop = self._last_car_crop_with_plate if self._last_car_crop_with_plate is not None else self._last_car_crop_img
+            self.visual_window.set_crops(
+                self._last_annotated,
+                _crop,
+                self._last_plate_crop,
+            )
+            if self._last_gradcam_overlay is not None and self._last_gradcam_heatmap is not None and self.last_car_crop is not None:
+                self.visual_window.update_heatmap(
+                    self._last_gradcam_overlay, self._last_gradcam_heatmap,
+                    self.last_car_crop, self.last_brand or "---"
+                )
+            self.visual_window.show()
+            self.visual_window.raise_()
         else:
-            self.crops_window.hide()
+            self.visual_window.hide()
 
     def clear_results(self):
         """Czyści wyniki."""
-        if self.crops_window is not None:
-            self.crops_window.clear_all()
+        if self.visual_window is not None:
+            self.visual_window.clear_all()
         self.brand_card.reset()
         self.plate_card.reset()
-        self.heatmap_btn.setEnabled(False)
-        self.crops_btn.setEnabled(False)
+        self.visual_btn.setEnabled(False)
         self.save_db_btn.setEnabled(False)
         self.last_car_crop = None
         self.last_brand = None
@@ -1338,6 +1450,7 @@ class MainWindow(QMainWindow):
         self._last_plate_crop = None
         self._last_car_crop_with_plate = None
         self._last_gradcam_overlay = None
+        self._last_gradcam_heatmap = None
         self._last_detection_id = None
         self._brand_done = False
         self._anpr_done = False
@@ -1354,15 +1467,14 @@ class MainWindow(QMainWindow):
         self.input_card.setEnabled(False)
         self.brand_card.reset()
         self.plate_card.reset()
-        self.heatmap_btn.setEnabled(False)
-        self.crops_btn.setEnabled(False)
+        self.visual_btn.setEnabled(False)
         self.save_db_btn.setEnabled(False)
         self.last_brand = None
         self._brand_done = False
         self._anpr_done = False
         
-        if self.crops_window is not None:
-            self.crops_window.plate_crop_card.clear_image()
+        if self.visual_window is not None:
+            self.visual_window.plate_crop_card.clear_image()
         
         self.worker = AnalysisWorker(
             self.current_image,
@@ -1383,14 +1495,14 @@ class MainWindow(QMainWindow):
         # Zapisz i wyświetl detekcję i crop
         if results.get('annotated_image') is not None:
             self._last_annotated = results['annotated_image']
-            if self.crops_window is not None:
-                pixmap = cv2_to_qpixmap(self._last_annotated, max_width=320, max_height=240)
-                self.crops_window.detection_card.set_image(pixmap)
         if results.get('car_crop') is not None:
             self._last_car_crop_img = results['car_crop']
-            if self.crops_window is not None:
-                pixmap = cv2_to_qpixmap(self._last_car_crop_img, max_width=320, max_height=240)
-                self.crops_window.crop_card.set_image(pixmap)
+        if self.visual_window is not None:
+            self.visual_window.set_crops(
+                self._last_annotated,
+                self._last_car_crop_img,
+                None,
+            )
 
         if self.last_car_crop is None:
             self.brand_card.set_value("Brak", "Pewność: 0.0%")
@@ -1426,8 +1538,7 @@ class MainWindow(QMainWindow):
         brand = results.get('brand', '---')
         confidence = results.get('brand_confidence', 0.0)
         self.last_brand = brand
-        self.heatmap_btn.setEnabled(True)
-        self.crops_btn.setEnabled(True)
+        self.visual_btn.setEnabled(True)
         self.brand_card.set_value(brand, f"Pewność: {confidence:.1f}%")
 
         if confidence >= 80:
@@ -1452,14 +1563,15 @@ class MainWindow(QMainWindow):
         
         if results.get('plate_crop') is not None:
             self._last_plate_crop = results['plate_crop']
-            if self.crops_window is not None:
-                pixmap = cv2_to_qpixmap(self._last_plate_crop, max_width=320, max_height=100)
-                self.crops_window.plate_crop_card.set_image(pixmap)
         if results.get('car_crop_with_plate') is not None:
             self._last_car_crop_with_plate = results['car_crop_with_plate']
-            if self.crops_window is not None:
-                pixmap = cv2_to_qpixmap(self._last_car_crop_with_plate, max_width=320, max_height=240)
-                self.crops_window.crop_card.set_image(pixmap)
+        if self.visual_window is not None:
+            _crop = self._last_car_crop_with_plate if self._last_car_crop_with_plate is not None else self._last_car_crop_img
+            self.visual_window.set_crops(
+                None,
+                _crop,
+                self._last_plate_crop,
+            )
 
         self._anpr_done = True
         if self._brand_done:
@@ -1478,8 +1590,7 @@ class MainWindow(QMainWindow):
 
     def on_brand_error(self, error: str):
         self.brand_card.set_value("Błąd", "Nie udało się rozpoznać marki")
-        self.heatmap_btn.setEnabled(False)
-        self.crops_btn.setEnabled(False)
+        self.visual_btn.setEnabled(False)
         self._brand_done = True
         if self._anpr_done:
             self.input_card.setEnabled(True)
@@ -1534,6 +1645,11 @@ class MainWindow(QMainWindow):
                     overlay, _heatmap, _cam = self.brand_classifier.generate_gradcam(self.last_car_crop)
                     gradcam_overlay = overlay
                     self._last_gradcam_overlay = overlay
+                    self._last_gradcam_heatmap = _heatmap
+                    if self.visual_window is not None:
+                        self.visual_window.update_heatmap(
+                            overlay, _heatmap, self.last_car_crop, self.last_brand or "---"
+                        )
                 except Exception as e:
                     logger.warning(f"Grad-CAM generation failed (auto-save): {e}")
             
@@ -1563,21 +1679,33 @@ class MainWindow(QMainWindow):
         self.status_bar.set_status(f"Błąd: {error}", "❌")
     
     def show_heatmap(self):
-        """Wyświetla mapę ciepła."""
+        """Wyświetla mapę ciepła w połączonym oknie (tab Mapa ciepła)."""
         if self.last_car_crop is None or self.brand_classifier is None:
             return
-        
-        self.status_bar.set_status("Generowanie mapy ciepła...", "⏳")
-        QApplication.processEvents()
-        
-        try:
-            overlay, heatmap, cam = self.brand_classifier.generate_gradcam(self.last_car_crop)
-            dialog = HeatmapDialog(self, overlay, heatmap, self.last_car_crop, self.last_brand)
-            dialog.exec()
-            self.status_bar.set_status("Mapa ciepła wygenerowana", "✅")
-        except Exception as e:
-            QMessageBox.critical(self, "Błąd", f"Nie udało się wygenerować mapy ciepła:\n{str(e)}")
-            self.status_bar.set_status(f"Błąd: {str(e)}", "❌")
+
+        # Jeśli heatmapa jest już wyliczona, użyj jej; w przeciwnym razie generuj
+        if self._last_gradcam_overlay is None or self._last_gradcam_heatmap is None:
+            self.status_bar.set_status("Generowanie mapy ciepła...", "⏳")
+            QApplication.processEvents()
+            try:
+                overlay, heatmap, _cam = self.brand_classifier.generate_gradcam(self.last_car_crop)
+                self._last_gradcam_overlay = overlay
+                self._last_gradcam_heatmap = heatmap
+            except Exception as e:
+                QMessageBox.critical(self, "Błąd", f"Nie udało się wygenerować mapy ciepła:\n{str(e)}")
+                self.status_bar.set_status(f"Błąd: {str(e)}", "❌")
+                return
+
+        if self.visual_window is None:
+            self.visual_window = VisualWindow(self)
+        self.visual_window.update_heatmap(
+            self._last_gradcam_overlay, self._last_gradcam_heatmap,
+            self.last_car_crop, self.last_brand or "---"
+        )
+        self.visual_window.show_heatmap_tab()
+        self.visual_window.show()
+        self.visual_window.raise_()
+        self.status_bar.set_status("Mapa ciepła wygenerowana", "✅")
     
     def save_to_database(self):
         """Zapisuje wynik analizy do bazy danych (ręczne wywołanie)."""
@@ -2367,84 +2495,6 @@ class HistoryDialog(QDialog):
         except Exception as e:
             logger.error(f"Error deleting: {e}")
             QMessageBox.critical(self, "Błąd", f"Nie udało się usunąć:\n{str(e)}")
-
-
-class HeatmapDialog(QDialog):
-    """Nowoczesne okno dialogowe z mapą ciepła."""
-    
-    def __init__(self, parent, overlay: np.ndarray, heatmap: np.ndarray, 
-                 original: np.ndarray, brand: str):
-        super().__init__(parent)
-        
-        self.setWindowTitle(f"Grad-CAM - {brand}")
-        self.setMinimumSize(950, 600)
-        self.setStyleSheet(DARK_STYLE)
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(20)
-        
-        header = QVBoxLayout()
-        title = QLabel(f" Mapa aktywacji dla: {brand}")
-        title.setStyleSheet("font-size: 22px; font-weight: 700; color: #f0f6fc;")
-        header.addWidget(title)
-        
-        desc = QLabel("Wizualizacja obszarów obrazu które najbardziej wpłynęły na decyzję modelu")
-        desc.setStyleSheet("font-size: 13px; color: #8b949e;")
-        header.addWidget(desc)
-        layout.addLayout(header)
-        
-        images = QHBoxLayout()
-        images.setSpacing(16)
-        
-        orig_card = self._create_image_card("Oryginalny obraz", original, "#30363d")
-        images.addWidget(orig_card)
-        
-        heat_card = self._create_image_card("Mapa ciepła", heatmap, "#da3633")
-        images.addWidget(heat_card)
-        
-        over_card = self._create_image_card("Nałożenie", overlay, "#238636")
-        images.addWidget(over_card)
-        
-        layout.addLayout(images)
-        
-        legend = QLabel("🔴 Czerwony = wysoki wpływ na decyzję  •  🔵 Niebieski = niski wpływ")
-        legend.setStyleSheet("color: #8b949e; font-size: 12px;")
-        legend.setAlignment(Qt.AlignCenter)
-        layout.addWidget(legend)
-        
-        close_btn = QPushButton("Zamknij")
-        close_btn.setProperty("class", "secondary")
-        close_btn.setFixedSize(120, 40)
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.clicked.connect(self.close)
-        layout.addWidget(close_btn, alignment=Qt.AlignCenter)
-    
-    def _create_image_card(self, title: str, image: np.ndarray, border_color: str) -> QFrame:
-        card = QFrame()
-        card.setStyleSheet(f"""
-            QFrame {{
-                background-color: #1f2937;
-                border: none;
-                border-radius: 12px;
-            }}
-        """)
-        
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 12, 12, 12)
-        
-        lbl_title = QLabel(title)
-        lbl_title.setStyleSheet("font-weight: 600; color: #f0f6fc;")
-        lbl_title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(lbl_title)
-        
-        img_label = QLabel()
-        pixmap = cv2_to_qpixmap(image, max_width=280, max_height=280)
-        img_label.setPixmap(pixmap)
-        img_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(img_label)
-        
-        return card
 
 
 def run_app(model_path: str, classes_path: str, plate_model_path: str = None):
