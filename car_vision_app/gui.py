@@ -1269,13 +1269,6 @@ class MainWindow(QMainWindow):
         self.visual_btn.clicked.connect(self.toggle_visual_window)
         sidebar_layout.addWidget(self.visual_btn)
 
-        sidebar_layout.addSpacing(16)
-        sep = QFrame()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet("background-color: #374151;")
-        sidebar_layout.addWidget(sep)
-        sidebar_layout.addSpacing(8)
-
         self.save_db_btn = QPushButton("💾  Zapisz do bazy")
         self.save_db_btn.setProperty("class", "secondary")
         self.save_db_btn.setMinimumHeight(44)
@@ -1291,13 +1284,6 @@ class MainWindow(QMainWindow):
         self.history_btn.setCursor(Qt.PointingHandCursor)
         self.history_btn.clicked.connect(self.show_history)
         sidebar_layout.addWidget(self.history_btn)
-
-        sidebar_layout.addSpacing(16)
-        sep2 = QFrame()
-        sep2.setFixedHeight(1)
-        sep2.setStyleSheet("background-color: #374151;")
-        sidebar_layout.addWidget(sep2)
-        sidebar_layout.addSpacing(8)
 
         self.batch_btn = QPushButton("📂  Przetwarzanie wsadowe")
         self.batch_btn.setProperty("class", "accent")
